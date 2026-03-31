@@ -1,0 +1,28 @@
+[package]
+name = "qingshi-khd-muban"
+version = "0.1.0"
+description = "青拾客户端模板"
+authors = ["qingshi"]
+edition = "2021"
+
+[lib]
+name = "qingshi_khd_muban_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hostname = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Graphics_Dwm"] }
