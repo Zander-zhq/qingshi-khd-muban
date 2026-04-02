@@ -37,13 +37,52 @@ npm run tauri dev
 npm run tauri build
 ```
 
+## 窗口架构
+
+采用**单窗口 + 隐身换装**架构。整个应用只有一个 Tauri 窗口（label: `main`），登录页和主页通过 Vue Router 在同一个窗口内切换，窗口尺寸由 Rust 端原子操作完成（hide → resize → center → show），用户看不到尺寸变化过程。
+
+### 布局切换流程
+
+| 场景 | 流程 |
+|------|------|
+| 登录 → 主页 | Rust: hide → 1440x900 → center → JS: router.push → Rust: show |
+| 主页 → 登录 | Rust: hide → 420x640 → center → JS: router.push → Rust: show |
+
+### Rust 命令
+
+| 命令 | 说明 |
+|------|------|
+| `prepare_window` | 隐藏窗口 + 设置尺寸/最小尺寸/可缩放 + 居中 |
+| `reveal_window` | 显示窗口 + 聚焦 |
+| `exit_app` | 退出应用 |
+| `compute_sign` | 请求签名计算 |
+| `get_device_id` | 获取设备唯一标识 |
+| `get_app_credentials` | 获取应用凭证 |
+
+### 前端工具函数 (`src/utils/window.ts`)
+
+| 函数 | 说明 |
+|------|------|
+| `switchToMainLayout(router)` | 切换到主布局（hide → resize → push → show） |
+| `switchToLoginLayout(router)` | 切换到登录布局（hide → resize → push → show） |
+| `showWindow()` | 显示窗口 |
+| `exitApp()` | 退出应用 |
+
 ## 项目结构
 
 ```
 ├── src/                  # Vue 前端源码
+│   ├── api/              # API 请求
+│   ├── components/       # 公共组件（TitleBar 等）
+│   ├── layouts/          # 布局组件（MainLayout）
+│   ├── router/           # 路由配置
+│   ├── stores/           # Pinia 状态管理
+│   ├── utils/            # 工具函数（window、logger 等）
+│   └── views/            # 页面视图
 ├── src-tauri/            # Tauri/Rust 后端源码
 │   ├── src/              # Rust 源码
 │   ├── icons/            # 应用图标
+│   ├── capabilities/     # 权限配置
 │   ├── Cargo.toml        # Rust 依赖配置
 │   └── tauri.conf.json   # Tauri 配置
 ├── public/               # 静态资源

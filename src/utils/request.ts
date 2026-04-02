@@ -1,27 +1,16 @@
 import axios from 'axios'
 import type { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
-import { invoke } from '@tauri-apps/api/core'
 import { logger } from './logger'
+import { createSignHeaders } from './sign'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL as string
 
-const SIGN_REQUIRED_PREFIXES = [
-  '/client/user/',
-  '/client/login',
-  '/client/heartbeat',
-  '/client/logout',
-]
-
-interface SignResult {
-  app_id: string
-  timestamp: string
-  nonce: string
-  sign: string
-}
-
+/** 所有 /client/* 接口（除 /client/init）都需要签名 */
 function needsSign(url: string | undefined): boolean {
   if (!url) return false
-  return SIGN_REQUIRED_PREFIXES.some((p) => url.includes(p))
+  if (!url.includes('/client/')) return false
+  if (url.includes('/client/init')) return false
+  return true
 }
 
 const service: AxiosInstance = axios.create({
@@ -39,33 +28,43 @@ service.interceptors.request.use(
       config.headers.Authorization = `Bearer ${token}`
     }
 
-    if (needsSign(config.url) && config.data) {
-      const bodyJson = typeof config.data === 'string' ? config.data : JSON.stringify(config.data)
-      const signResult = await invoke<SignResult>('compute_sign', { bodyJson })
-      config.headers['X-App-Id'] = signResult.app_id
-      config.headers['X-Timestamp'] = signResult.timestamp
-      config.headers['X-Nonce'] = signResult.nonce
-      config.headers['X-Sign'] = signResult.sign
-      logger.log('request', '签名完成', {
-        method: config.method,
-        url: config.url,
-        hasToken: !!token,
-        headers: {
-          'X-App-Id': signResult.app_id,
-          'X-Timestamp': signResult.timestamp,
-          'X-Nonce': signResult.nonce,
-          'X-Sign': signResult.sign,
-        },
-      })
+    const isFormData = config.data instanceof FormData ||
+      (config.data && typeof config.data === 'object' && typeof config.data.append === 'function')
+
+    if (isFormData) {
+      config.headers.delete('Content-Type')
     }
 
-    logger.log('request', '请求发出前', {
-      baseURL: config.baseURL,
+    if (needsSign(config.url) && config.data) {
+      let body: Record<string, unknown>
+      if (isFormData) {
+        body = {}
+        ;(config.data as FormData).forEach((value: FormDataEntryValue, key: string) => {
+          if (typeof value === 'string') body[key] = value
+        })
+      } else if (typeof config.data === 'string') {
+        body = JSON.parse(config.data)
+      } else {
+        body = JSON.parse(JSON.stringify(config.data))
+      }
+      const signHeaders = await createSignHeaders(body)
+      config.headers['X-App-Id'] = signHeaders['X-App-Id']
+      config.headers['X-Timestamp'] = signHeaders['X-Timestamp']
+      config.headers['X-Nonce'] = signHeaders['X-Nonce']
+      config.headers['X-Sign'] = signHeaders['X-Sign']
+    }
+
+    logger.log('request', '请求发出', {
       method: config.method,
       url: config.url,
       hasToken: !!token,
-      params: config.params,
       data: config.data,
+      signHeaders: needsSign(config.url) ? {
+        'X-App-Id': config.headers['X-App-Id'],
+        'X-Timestamp': config.headers['X-Timestamp'],
+        'X-Nonce': config.headers['X-Nonce'],
+        'X-Sign': config.headers['X-Sign'],
+      } : undefined,
     })
 
     return config
@@ -96,7 +95,9 @@ service.interceptors.response.use(
         code: res.code,
         msg: res.msg,
       })
-      return Promise.reject(new Error(res.msg || '请求失败'))
+      const err = new Error(res.msg || '请求失败') as Error & { code: number }
+      err.code = res.code
+      return Promise.reject(err)
     }
 
     if (res.code !== undefined) {

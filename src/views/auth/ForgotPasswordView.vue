@@ -1,18 +1,20 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import InputText from 'primevue/inputtext'
 import Password from 'primevue/password'
 import Button from 'primevue/button'
 import TitleBar from '../../components/TitleBar.vue'
-async function forgotPasswordApi(_data: { email: string }) {
-  throw new Error('找回密码功能暂未开放')
-}
-async function resetPasswordApi(_data: { email: string; code: string; new_password: string }) {
-  throw new Error('找回密码功能暂未开放')
-}
+import { sendEmailCodeApi, resetPasswordApi } from '../../api/auth'
+import { getAppCredentials } from '../../utils/config'
 
 const router = useRouter()
+const appId = ref('')
+
+onMounted(async () => {
+  const creds = await getAppCredentials()
+  appId.value = creds.appId
+})
 
 const step = ref<'email' | 'reset'>('email')
 const email = ref('')
@@ -20,8 +22,31 @@ const code = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
 const loading = ref(false)
+const sendingCode = ref(false)
+const codeCooldown = ref(0)
 const errMsg = ref('')
 const successMsg = ref('')
+
+let cooldownTimer: ReturnType<typeof setInterval> | null = null
+
+const codeBtnText = computed(() =>
+  codeCooldown.value > 0 ? `${codeCooldown.value}s` : '发送验证码'
+)
+
+function startCooldown() {
+  codeCooldown.value = 60
+  cooldownTimer = setInterval(() => {
+    codeCooldown.value--
+    if (codeCooldown.value <= 0 && cooldownTimer) {
+      clearInterval(cooldownTimer)
+      cooldownTimer = null
+    }
+  }, 1000)
+}
+
+onUnmounted(() => {
+  if (cooldownTimer) clearInterval(cooldownTimer)
+})
 
 function clearMsg() {
   errMsg.value = ''
@@ -36,27 +61,34 @@ async function handleSendCode() {
     return
   }
 
-  loading.value = true
+  sendingCode.value = true
   try {
-    await forgotPasswordApi({ email: email.value.trim() })
+    await sendEmailCodeApi({ app_id: appId.value, email: email.value.trim(), scene: 'reset_password' })
     successMsg.value = '验证码已发送到邮箱'
-    step.value = 'reset'
+    startCooldown()
   } catch (err: unknown) {
     errMsg.value = err instanceof Error ? err.message : '发送失败'
   } finally {
-    loading.value = false
+    sendingCode.value = false
   }
+}
+
+function handleNextStep() {
+  clearMsg()
+  if (!email.value.trim()) { errMsg.value = '请输入邮箱地址'; return }
+  if (!code.value.trim()) { errMsg.value = '请输入验证码'; return }
+  step.value = 'reset'
 }
 
 async function handleResetPassword() {
   clearMsg()
-  if (!code.value.trim()) { errMsg.value = '请输入验证码'; return }
   if (!newPassword.value || newPassword.value.length < 6) { errMsg.value = '密码至少6位'; return }
   if (newPassword.value !== confirmPassword.value) { errMsg.value = '两次密码不一致'; return }
 
   loading.value = true
   try {
     await resetPasswordApi({
+      app_id: appId.value,
       email: email.value.trim(),
       code: code.value.trim(),
       new_password: newPassword.value,
@@ -74,8 +106,7 @@ async function handleResetPassword() {
 <template>
   <div class="window-shell">
     <div class="window-content">
-      <TitleBar />
-
+      <TitleBar variant="auth" />
       <div class="banner">
         <div class="bc bc-1"></div>
         <div class="bc bc-2"></div>
@@ -83,54 +114,67 @@ async function handleResetPassword() {
       </div>
 
       <div class="body">
-        <template v-if="step === 'email'">
-          <div class="step-hint">请输入注册时使用的邮箱</div>
-          <form class="form" @submit.prevent="handleSendCode">
-            <div class="field-box">
-              <InputText v-model="email" placeholder="邮箱地址" class="field-input" type="email" @input="clearMsg" />
-            </div>
-
-            <Transition name="fade">
-              <div v-if="errMsg" class="msg-tip msg-err">
-                <i class="pi pi-exclamation-circle"></i>{{ errMsg }}
+        <div class="form-area">
+          <template v-if="step === 'email'">
+            <div class="step-hint">请输入邮箱用来找回密码</div>
+            <form class="form" @submit.prevent="handleNextStep">
+              <div class="field-box">
+                <InputText v-model="email" placeholder="邮箱地址" class="field-input" type="email" @input="clearMsg" />
               </div>
-            </Transition>
 
-            <Button type="submit" label="发送验证码" :loading="loading" class="submit-btn" />
-          </form>
-        </template>
-
-        <template v-else>
-          <div class="step-hint">验证码已发送至 {{ email }}</div>
-          <form class="form" @submit.prevent="handleResetPassword">
-            <div class="field-box">
-              <InputText v-model="code" placeholder="邮箱验证码" class="field-input" maxlength="6" @input="clearMsg" />
-            </div>
-
-            <div class="field-box">
-              <Password v-model="newPassword" placeholder="新密码（至少6位）" :feedback="false" toggleMask class="field-pw" inputClass="field-input" @input="clearMsg" />
-            </div>
-
-            <div class="field-box">
-              <Password v-model="confirmPassword" placeholder="确认新密码" :feedback="false" toggleMask class="field-pw" inputClass="field-input" @input="clearMsg" />
-            </div>
-
-            <Transition name="fade">
-              <div v-if="errMsg" class="msg-tip msg-err">
-                <i class="pi pi-exclamation-circle"></i>{{ errMsg }}
+              <div class="field-box code-row">
+                <InputText v-model="code" placeholder="验证码" class="field-input code-input" maxlength="6" @input="clearMsg" />
+                <Button
+                  type="button"
+                  :label="codeBtnText"
+                  :disabled="codeCooldown > 0"
+                  :loading="sendingCode"
+                  class="code-btn"
+                  @click="handleSendCode"
+                />
               </div>
-              <div v-else-if="successMsg" class="msg-tip msg-ok">
-                <i class="pi pi-check-circle"></i>{{ successMsg }}
+
+              <Transition name="fade">
+                <div v-if="errMsg" class="msg-tip msg-err">
+                  <i class="pi pi-exclamation-circle"></i>{{ errMsg }}
+                </div>
+                <div v-else-if="successMsg" class="msg-tip msg-ok">
+                  <i class="pi pi-check-circle"></i>{{ successMsg }}
+                </div>
+              </Transition>
+
+              <Button type="submit" label="下一步" class="submit-btn" />
+            </form>
+          </template>
+
+          <template v-else>
+            <div class="step-hint">设置新密码</div>
+            <form class="form" @submit.prevent="handleResetPassword">
+              <div class="field-box">
+                <Password v-model="newPassword" placeholder="新密码（至少6位）" :feedback="false" toggleMask class="field-pw" inputClass="field-input" @input="clearMsg" />
               </div>
-            </Transition>
 
-            <Button type="submit" label="重置密码" :loading="loading" class="submit-btn" />
+              <div class="field-box">
+                <Password v-model="confirmPassword" placeholder="确认新密码" :feedback="false" toggleMask class="field-pw" inputClass="field-input" @input="clearMsg" />
+              </div>
 
-            <div class="resend-wrap">
-              <button type="button" class="resend-link" @click="step = 'email'; clearMsg()">重新发送验证码</button>
-            </div>
-          </form>
-        </template>
+              <Transition name="fade">
+                <div v-if="errMsg" class="msg-tip msg-err">
+                  <i class="pi pi-exclamation-circle"></i>{{ errMsg }}
+                </div>
+                <div v-else-if="successMsg" class="msg-tip msg-ok">
+                  <i class="pi pi-check-circle"></i>{{ successMsg }}
+                </div>
+              </Transition>
+
+              <Button type="submit" label="重置密码" :loading="loading" class="submit-btn" />
+
+              <div class="resend-wrap">
+                <button type="button" class="resend-link" @click="step = 'email'; clearMsg()">返回上一步</button>
+              </div>
+            </form>
+          </template>
+        </div>
 
         <div class="bottom-links">
           <a href="#" class="link-text" @click.prevent="router.push('/login')">
@@ -160,22 +204,26 @@ async function handleResetPassword() {
   position: relative;
 }
 
+.window-content :deep(.app-titlebar.titlebar-compact) {
+  position: relative;
+}
+
 .banner {
   height: 100px;
   position: relative;
   background: var(--qs-bg-gradient);
   flex-shrink: 0;
-  overflow: hidden;
+  overflow: visible;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-top: 10px;
 }
 
 .bc {
   position: absolute;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.07);
+  pointer-events: none;
 }
 .bc-1 { width: 160px; height: 160px; top: -60px; right: -20px; }
 .bc-2 { width: 90px; height: 90px; bottom: -30px; left: 10px; }
@@ -183,10 +231,10 @@ async function handleResetPassword() {
 .banner-title {
   position: relative;
   z-index: 1;
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-size: 1.4rem;
+  font-weight: 700;
   color: #fff;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.12em;
   text-shadow: 0 1px 8px rgba(0, 0, 0, 0.1);
 }
 
@@ -194,7 +242,16 @@ async function handleResetPassword() {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 28px 40px 24px;
+  padding: 0 36px;
+  min-height: 0;
+}
+
+.form-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
 .step-hint {
@@ -305,8 +362,38 @@ async function handleResetPassword() {
   color: var(--qs-primary);
 }
 
+.code-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.code-row :deep(.code-input) {
+  flex: 1;
+  min-width: 0;
+}
+
+.code-btn {
+  flex-shrink: 0;
+  height: 46px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  border-radius: 10px;
+  white-space: nowrap;
+  padding: 0 14px;
+  background: var(--qs-bg-gradient) !important;
+  border: none !important;
+  color: #fff !important;
+  transition: all 0.2s;
+}
+
+.code-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .bottom-links {
-  margin-top: auto;
+  flex-shrink: 0;
   padding: 16px 0 12px;
   display: flex;
   justify-content: center;

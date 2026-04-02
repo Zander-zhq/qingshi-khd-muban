@@ -2,62 +2,56 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import InputText from 'primevue/inputtext'
-import Password from 'primevue/password'
 import Button from 'primevue/button'
 import TitleBar from '../../components/TitleBar.vue'
-import { userRegisterApi } from '../../api/auth'
-import { getDeviceId } from '../../utils/device'
+import { redeemCardApi } from '../../api/auth'
 import { getAppCredentials } from '../../utils/config'
 
 const router = useRouter()
-
-const phone = ref('')
-const password = ref('')
-const confirmPassword = ref('')
-const inviteCode = ref('')
-const deviceId = ref('')
 const appId = ref('')
+
+onMounted(async () => {
+  const creds = await getAppCredentials()
+  appId.value = creds.appId
+})
+
+const acctno = ref('')
+const cardKey = ref('')
 const loading = ref(false)
 const errMsg = ref('')
 const successMsg = ref('')
-
-onMounted(async () => {
-  const [did, creds] = await Promise.all([getDeviceId(), getAppCredentials()])
-  deviceId.value = did
-  appId.value = creds.appId
-})
 
 function clearMsg() {
   errMsg.value = ''
   successMsg.value = ''
 }
 
-async function handleRegister() {
+async function handleRecharge() {
   clearMsg()
 
-  const phoneVal = phone.value.trim()
-  if (!phoneVal) { errMsg.value = '请输入手机号'; return }
-  if (!/^1[3-9]\d{9}$/.test(phoneVal)) { errMsg.value = '手机号格式不正确'; return }
-  if (!password.value || password.value.length < 6) { errMsg.value = '密码至少6位'; return }
-  if (password.value.length > 18) { errMsg.value = '密码最长18位'; return }
-  if (password.value !== confirmPassword.value) { errMsg.value = '两次密码不一致'; return }
+  if (!acctno.value.trim()) { errMsg.value = '请输入账号（手机号）'; return }
+  if (!cardKey.value.trim()) { errMsg.value = '请输入卡密'; return }
 
   loading.value = true
   try {
-    const params: Record<string, string> = {
+    const res = await redeemCardApi({
       app_id: appId.value,
-      phone: phoneVal,
-      password: password.value,
-      device_id: deviceId.value,
+      acctno: acctno.value.trim(),
+      card_key: cardKey.value.trim(),
+    })
+    const cardType = (res as any).card_type || ''
+    const expireAt = (res as any).vip_expire_at || ''
+    let msg = '充值成功！'
+    if (cardType) msg += ` (${cardType})`
+    if (expireAt) {
+      const d = new Date(expireAt)
+      msg += `  到期：${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
     }
-    const trimmedInvite = inviteCode.value.trim()
-    if (trimmedInvite) params.invite_code = trimmedInvite
-
-    await userRegisterApi(params as any)
-    successMsg.value = '注册成功，正在跳转...'
+    successMsg.value = msg
+    cardKey.value = ''
     setTimeout(() => router.push('/login'), 1500)
   } catch (err: unknown) {
-    errMsg.value = err instanceof Error ? err.message : '注册失败'
+    errMsg.value = err instanceof Error ? err.message : '充值失败'
   } finally {
     loading.value = false
   }
@@ -71,77 +65,49 @@ async function handleRegister() {
       <div class="banner">
         <div class="bc bc-1"></div>
         <div class="bc bc-2"></div>
-        <div class="banner-title">注册账号</div>
+        <div class="banner-title">卡密充值</div>
       </div>
 
       <div class="body">
-        <form class="form" @submit.prevent="handleRegister">
-          <div class="field-box">
-            <InputText
-              v-model="phone"
-              placeholder="手机号"
-              class="field-input"
-              maxlength="11"
-              @input="clearMsg"
-            />
-          </div>
-
-          <div class="field-box">
-            <Password
-              v-model="password"
-              placeholder="密码（6-18位）"
-              toggleMask
-              class="field-pw"
-              inputClass="field-input"
-              autocomplete="new-password"
-              @input="clearMsg"
-            />
-          </div>
-
-          <div class="field-box">
-            <Password
-              v-model="confirmPassword"
-              placeholder="确认密码"
-              :feedback="false"
-              toggleMask
-              class="field-pw"
-              inputClass="field-input"
-              autocomplete="new-password"
-              @input="clearMsg"
-            />
-          </div>
-
-          <div class="field-box">
-            <InputText
-              v-model="inviteCode"
-              placeholder="邀请码（选填）"
-              class="field-input"
-              @input="clearMsg"
-            />
-          </div>
-
-          <Transition name="fade">
-            <div v-if="errMsg" class="msg-tip msg-err">
-              <i class="pi pi-exclamation-circle"></i>
-              {{ errMsg }}
+        <div class="form-area">
+          <form class="form" @submit.prevent="handleRecharge">
+            <div class="field-box">
+              <InputText
+                v-model="acctno"
+                placeholder="账号（手机号）"
+                class="field-input"
+                @input="clearMsg"
+              />
             </div>
-            <div v-else-if="successMsg" class="msg-tip msg-ok">
-              <i class="pi pi-check-circle"></i>
-              {{ successMsg }}
-            </div>
-          </Transition>
 
-          <Button type="submit" label="注 册" :loading="loading" class="submit-btn" />
-        </form>
+            <div class="field-box">
+              <InputText
+                v-model="cardKey"
+                placeholder="卡密"
+                class="field-input"
+                @input="clearMsg"
+              />
+            </div>
+
+            <Transition name="fade">
+              <div v-if="errMsg" class="msg-tip msg-err">
+                <i class="pi pi-exclamation-circle"></i>
+                {{ errMsg }}
+              </div>
+              <div v-else-if="successMsg" class="msg-tip msg-ok">
+                <i class="pi pi-check-circle"></i>
+                {{ successMsg }}
+              </div>
+            </Transition>
+
+            <Button type="submit" label="充 值" :loading="loading" class="submit-btn" />
+          </form>
+        </div>
 
         <div class="bottom-links">
           <a href="#" class="link-text" @click.prevent="router.push('/login')">
             <i class="pi pi-arrow-left" style="font-size: 0.7rem"></i>
             返回登录
-          </a>
-          <span class="bottom-sep">|</span>
-          <a href="#" class="link-text" @click.prevent="router.push('/recharge')">
-            卡密充值
           </a>
         </div>
       </div>
@@ -203,15 +169,23 @@ async function handleRegister() {
   flex: 1;
   display: flex;
   flex-direction: column;
-  padding: 20px 36px 10px;
+  padding: 0 36px;
   min-height: 0;
+}
+
+.form-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
 .form {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .field-box {
@@ -221,12 +195,12 @@ async function handleRegister() {
 .field-box :deep(.field-input),
 :deep(.field-pw .field-input) {
   width: 100%;
-  height: 38px;
-  font-size: 0.88rem;
+  height: 44px;
+  font-size: 0.92rem;
   border: 1.5px solid #e2e8f0;
   border-radius: 10px;
   background: #f8fafb;
-  padding: 0 14px;
+  padding: 0 16px;
   transition: all 0.2s;
 }
 
@@ -245,8 +219,8 @@ async function handleRegister() {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.78rem;
-  padding: 6px 10px;
+  font-size: 0.82rem;
+  padding: 8px 12px;
   border-radius: 8px;
 }
 
@@ -274,11 +248,11 @@ async function handleRegister() {
 
 .submit-btn {
   width: 100%;
-  height: 40px;
-  font-size: 0.95rem;
+  height: 44px;
+  font-size: 1rem;
   font-weight: 600;
-  border-radius: 20px;
-  margin-top: 2px;
+  border-radius: 22px;
+  margin-top: 4px;
   background: var(--qs-bg-gradient) !important;
   border: none !important;
   box-shadow: 0 4px 16px rgba(13, 148, 136, 0.3);
@@ -291,8 +265,8 @@ async function handleRegister() {
 }
 
 .bottom-links {
-  margin-top: auto;
-  padding: 6px 0 8px;
+  flex-shrink: 0;
+  padding: 16px 0 14px;
   display: flex;
   justify-content: center;
 }
@@ -310,14 +284,5 @@ async function handleRegister() {
 
 .link-text:hover {
   color: var(--qs-primary-dark);
-}
-
-.bottom-sep {
-  color: #cbd5e1;
-  font-size: 0.8rem;
-}
-
-.bottom-links {
-  gap: 8px;
 }
 </style>

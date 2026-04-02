@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "label": "login",
+        "label": "main",
         "title": "青拾",
         "url": "/login",
         "width": 420,

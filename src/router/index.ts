@@ -28,6 +28,18 @@ const router = createRouter({
       meta: { title: '找回密码 - 青拾' },
     },
     {
+      path: '/recharge',
+      name: 'Recharge',
+      component: () => import('../views/auth/RechargeView.vue'),
+      meta: { title: '卡密充值 - 青拾' },
+    },
+    {
+      path: '/unbind-device',
+      name: 'UnbindDevice',
+      component: () => import('../views/auth/UnbindDeviceView.vue'),
+      meta: { title: '解绑设备 - 青拾' },
+    },
+    {
       path: '/main',
       component: () => import('../layouts/MainLayout.vue'),
       meta: { title: '主页 - 青拾', requiresAuth: true },
@@ -49,9 +61,6 @@ const router = createRouter({
 
 router.beforeEach((to) => {
   const userStore = useUserStore()
-  // #region agent log
-  fetch('http://127.0.0.1:7486/ingest/637909e2-8eda-4b2c-af00-1f426bec300c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'23ef92'},body:JSON.stringify({sessionId:'23ef92',location:'router/index.ts:beforeEach',message:'router guard',data:{to:to.fullPath,requiresAuth:!!to.meta.requiresAuth,isLoggedIn:userStore.isLoggedIn,windowTitle:document.title},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   logger.log('router', '路由进入 beforeEach', {
     to: to.fullPath,
     requiresAuth: !!to.meta.requiresAuth,

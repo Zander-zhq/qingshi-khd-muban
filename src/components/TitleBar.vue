@@ -2,16 +2,18 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
+import { invoke } from '@tauri-apps/api/core'
 import { showDialog } from '@/utils/dialog'
 import { exitApp } from '@/utils/window'
 
 defineProps<{
-  variant?: 'full' | 'minimal'
+  variant?: 'full' | 'minimal' | 'auth'
   title?: string
 }>()
 
-const APP_NAME = '青拾'
-const APP_VERSION = 'V0.1.0'
+const APP_BRAND = '青拾'
+const APP_PRODUCT = '视频下载'
+const APP_VERSION = 'V1.1.1'
 
 const appWindow = getCurrentWindow()
 const isMaximized = ref(false)
@@ -34,13 +36,21 @@ onUnmounted(() => {
   document.removeEventListener('click', closeMenu)
 })
 
+const expandedSub = ref('')
+
 function closeMenu() {
   showMenu.value = false
+  expandedSub.value = ''
 }
 
 function toggleMenu(e: MouseEvent) {
   e.stopPropagation()
   showMenu.value = !showMenu.value
+  expandedSub.value = ''
+}
+
+function toggleSub(name: string) {
+  expandedSub.value = expandedSub.value === name ? '' : name
 }
 
 async function handleMinimize() {
@@ -78,6 +88,15 @@ function onClearCache() {
   window.location.reload()
 }
 
+async function syncTrayChecks() {
+  try {
+    await invoke('sync_tray_checks', {
+      autostart: autoStartEnabled.value,
+      closeMode: closeMode.value,
+    })
+  } catch { /* ignore */ }
+}
+
 async function setAutoStart(enabled: boolean) {
   showMenu.value = false
   try {
@@ -87,6 +106,7 @@ async function setAutoStart(enabled: boolean) {
       await disable()
     }
     autoStartEnabled.value = await isEnabled()
+    await syncTrayChecks()
   } catch { /* ignore */ }
 }
 
@@ -94,13 +114,14 @@ function setCloseMode(mode: 'exit' | 'minimize') {
   showMenu.value = false
   closeMode.value = mode
   localStorage.setItem('close_mode', mode)
+  syncTrayChecks()
 }
 
 async function onAbout() {
   showMenu.value = false
   await showDialog({
     title: '关于',
-    message: `${APP_NAME} ${APP_VERSION}\n© 2024-2026 ${APP_NAME}`,
+    message: `${APP_BRAND}·${APP_PRODUCT} ${APP_VERSION}\n© 2024-2026 ${APP_BRAND}`,
   })
 }
 
@@ -111,10 +132,12 @@ async function onExit() {
 </script>
 
 <template>
-  <header class="app-titlebar" style="-webkit-app-region: drag">
-    <div v-if="variant === 'full'" class="tb-left">
-      <div class="tb-brand-icon">青</div>
-      <span class="tb-name">{{ APP_NAME }}</span>
+  <header class="app-titlebar" :class="{ 'titlebar-compact': variant === 'auth' }" style="-webkit-app-region: drag">
+    <div class="tb-left">
+      <img class="tb-brand-icon" src="/app-icon.png" alt="青拾" />
+      <span class="tb-name">{{ APP_BRAND }}</span>
+      <span class="tb-dot">·</span>
+      <span class="tb-product">{{ APP_PRODUCT }}</span>
       <span class="tb-version">{{ APP_VERSION }}</span>
       <template v-if="title">
         <span class="tb-sep">|</span>
@@ -138,12 +161,12 @@ async function onExit() {
           </button>
           <div class="app-menu-divider" />
           <div class="app-menu-has-sub">
-            <button class="app-menu-item">
+            <button class="app-menu-item" @click.stop="toggleSub('autostart')">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="M4.93 4.93l2.83 2.83"/><path d="M16.24 16.24l2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="M4.93 19.07l2.83-2.83"/><path d="M16.24 7.76l2.83-2.83"/></svg>
               开机自启
-              <span class="sub-arrow">›</span>
+              <span class="sub-arrow" :class="{ 'sub-arrow--open': expandedSub === 'autostart' }">›</span>
             </button>
-            <div class="app-sub-menu">
+            <div v-if="expandedSub === 'autostart'" class="app-sub-inline">
               <button class="app-menu-item" @click="setAutoStart(true)">
                 <span class="check-mark">{{ autoStartEnabled ? '✓' : '' }}</span>
                 开启
@@ -155,12 +178,12 @@ async function onExit() {
             </div>
           </div>
           <div class="app-menu-has-sub">
-            <button class="app-menu-item">
+            <button class="app-menu-item" @click.stop="toggleSub('closemode')">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
               关闭设置
-              <span class="sub-arrow">›</span>
+              <span class="sub-arrow" :class="{ 'sub-arrow--open': expandedSub === 'closemode' }">›</span>
             </button>
-            <div class="app-sub-menu">
+            <div v-if="expandedSub === 'closemode'" class="app-sub-inline">
               <button class="app-menu-item" @click="setCloseMode('exit')">
                 <span class="check-mark">{{ closeMode === 'exit' ? '✓' : '' }}</span>
                 直接退出
@@ -214,44 +237,52 @@ async function onExit() {
 }
 
 .tb-brand-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.18);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-weight: 700;
-  font-size: 0.95rem;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  object-fit: contain;
+  flex-shrink: 0;
 }
 
 .tb-name {
-  font-weight: 650;
+  font-weight: 700;
   color: #fff;
-  font-size: 1.05rem;
+  font-size: 0.95rem;
   line-height: 1;
   text-shadow: 0 1px 6px rgba(0, 0, 0, 0.12);
 }
 
+.tb-dot {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.85rem;
+  margin: 0 -4px;
+}
+
+.tb-product {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
 .tb-version {
   color: #fef3c7;
-  font-size: 0.72rem;
+  font-size: 0.65rem;
   font-weight: 600;
-  padding: 2px 8px;
+  padding: 1px 6px;
   background: rgba(255, 255, 255, 0.15);
   border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 6px;
+  border-radius: 4px;
+  line-height: 1.4;
 }
 
 .tb-sep {
-  color: rgba(255, 255, 255, 0.4);
-  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 0.85rem;
 }
 
 .tb-page {
   color: #f0fdfa;
-  font-size: 0.92rem;
+  font-size: 0.88rem;
   font-weight: 500;
 }
 
@@ -288,6 +319,47 @@ async function onExit() {
   background: #ef4444;
   color: white;
   border-color: #ef4444;
+}
+
+.titlebar-compact {
+  height: 36px;
+  padding: 0 8px;
+  border-bottom: none;
+}
+
+.titlebar-compact .tb-brand-icon {
+  width: 24px;
+  height: 24px;
+  font-size: 0.78rem;
+  border-radius: 6px;
+}
+
+.titlebar-compact .tb-left {
+  gap: 6px;
+}
+
+.titlebar-compact .tb-name {
+  font-size: 0.82rem;
+}
+
+.titlebar-compact .tb-product {
+  font-size: 0.72rem;
+}
+
+.titlebar-compact .tb-version {
+  font-size: 0.6rem;
+  padding: 0 5px;
+}
+
+.titlebar-compact .win-btn {
+  width: 30px;
+  height: 24px;
+  font-size: 13px;
+  border-radius: 6px;
+}
+
+.titlebar-compact .tb-right {
+  gap: 4px;
 }
 
 .app-menu-wrap {
@@ -344,10 +416,6 @@ async function onExit() {
   margin: 4px 0;
 }
 
-.app-menu-has-sub {
-  position: relative;
-}
-
 .app-menu-has-sub > .app-menu-item {
   justify-content: flex-start;
 }
@@ -357,31 +425,22 @@ async function onExit() {
   font-size: 1.1rem;
   color: #94a3b8;
   line-height: 1;
+  transition: transform 0.2s;
 }
 
-.app-sub-menu {
-  display: none;
-  position: absolute;
-  right: 100%;
-  top: -4px;
-  min-width: 140px;
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.15);
-  padding: 4px 0;
-  z-index: 510;
-  margin-right: 2px;
+.sub-arrow--open {
+  transform: rotate(90deg);
 }
 
-.app-menu-has-sub:hover > .app-sub-menu {
-  display: block;
+.app-sub-inline {
+  background: #f8fafc;
+  border-top: 1px solid #f1f5f9;
 }
 
-.app-sub-menu .app-menu-item {
+.app-sub-inline .app-menu-item {
   gap: 6px;
-  padding: 8px 14px;
-  font-size: 0.84rem;
+  padding: 7px 16px 7px 40px;
+  font-size: 0.82rem;
 }
 
 .check-mark {

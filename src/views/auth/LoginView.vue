@@ -1,68 +1,106 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { getCurrentWindow } from '@tauri-apps/api/window'
 import InputText from 'primevue/inputtext'
 import Password from 'primevue/password'
 import Button from 'primevue/button'
 import Checkbox from 'primevue/checkbox'
+import TitleBar from '../../components/TitleBar.vue'
 import { userLoginApi } from '../../api/auth'
 import { useUserStore } from '../../stores/user'
 import { getDeviceId } from '../../utils/device'
 import { getAppCredentials } from '../../utils/config'
 import { logger } from '../../utils/logger'
-import { activateMainWindow, exitApp } from '../../utils/window'
+import { switchToMainLayout, showWindow, ensureLoginSize } from '../../utils/window'
+import { startHeartbeat } from '../../utils/heartbeat'
 
 interface SavedAccount {
   acctno: string
   password: string
   username?: string
+  phone?: string
+  altAcctno?: string
 }
 
 const ACCOUNTS_KEY = 'saved_accounts'
 
+function getAccountAvatar(acctno: string): string {
+  return localStorage.getItem(`avatar_${acctno}`) || ''
+}
+
+function setAccountAvatar(acctno: string, data: string) {
+  if (!data) return
+  try { localStorage.setItem(`avatar_${acctno}`, data) } catch { /* quota */ }
+}
+
+function removeAccountAvatar(acctno: string) {
+  localStorage.removeItem(`avatar_${acctno}`)
+}
+
 function loadSavedAccounts(): SavedAccount[] {
   try {
     const raw = localStorage.getItem(ACCOUNTS_KEY)
-    return raw ? JSON.parse(raw) : []
+    if (!raw) return []
+    const list = JSON.parse(raw) as (SavedAccount & { avatar?: string })[]
+    return list.map(({ avatar, ...rest }) => {
+      if (avatar) {
+        try { localStorage.setItem(`avatar_${rest.acctno}`, avatar) } catch { /* migrate */ }
+      }
+      return rest
+    })
   } catch {
     return []
   }
 }
 
 function persistAccounts(accounts: SavedAccount[]) {
-  localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts))
+  const clean = accounts.map(({ acctno, password, username, phone, altAcctno }) => ({ acctno, password, username, phone, altAcctno }))
+  localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(clean))
 }
 
-function saveAccount(acct: SavedAccount) {
-  const list = loadSavedAccounts()
-  const idx = list.findIndex(a => a.acctno === acct.acctno)
-  if (idx >= 0) {
-    list[idx] = acct
-  } else {
-    list.unshift(acct)
+function isSameUser(saved: SavedAccount, loginAcctno: string, serverPhone?: string, serverAcctno?: string): boolean {
+  if (saved.acctno === loginAcctno) return true
+  if (serverPhone && (saved.acctno === serverPhone || saved.phone === serverPhone)) return true
+  if (serverAcctno && (saved.acctno === serverAcctno || saved.altAcctno === serverAcctno)) return true
+  return false
+}
+
+function saveAccount(acct: SavedAccount, serverPhone?: string, serverAcctno?: string) {
+  let list = loadSavedAccounts()
+  const dupeIndexes = list.reduce<number[]>((arr, a, i) => {
+    if (isSameUser(a, acct.acctno, serverPhone, serverAcctno)) arr.push(i)
+    return arr
+  }, [])
+
+  if (dupeIndexes.length > 0) {
+    for (const idx of dupeIndexes) {
+      const old = list[idx]
+      if (old.acctno !== acct.acctno) {
+        const oldAvatar = getAccountAvatar(old.acctno)
+        if (oldAvatar && !getAccountAvatar(acct.acctno)) {
+          setAccountAvatar(acct.acctno, oldAvatar)
+        }
+        removeAccountAvatar(old.acctno)
+      }
+    }
+    list = list.filter((_, i) => !dupeIndexes.includes(i))
   }
+  list.unshift(acct)
   persistAccounts(list)
   savedAccounts.value = list
 }
 
-function removeAccount(acctno: string) {
-  const list = loadSavedAccounts().filter(a => a.acctno !== acctno)
+function removeAccount(acctnoToRemove: string) {
+  const list = loadSavedAccounts().filter(a => a.acctno !== acctnoToRemove)
   persistAccounts(list)
+  removeAccountAvatar(acctnoToRemove)
   savedAccounts.value = list
 }
 
 const router = useRouter()
 const userStore = useUserStore()
-const appWindow = getCurrentWindow()
 
-async function handleMinimize() {
-  await appWindow.minimize()
-}
-
-async function handleCloseWindow() {
-  await exitApp()
-}
+const cachedAvatar = ref(localStorage.getItem('avatar_data') || '')
 
 const acctno = ref('')
 const password = ref('')
@@ -74,6 +112,7 @@ const deviceId = ref('')
 const appId = ref('')
 const autoLoginCountdown = ref(0)
 let autoLoginTimer: ReturnType<typeof setInterval> | null = null
+let loginAbortController: AbortController | null = null
 
 const savedAccounts = ref<SavedAccount[]>([])
 const showDropdown = ref(false)
@@ -103,6 +142,9 @@ watch(rememberPwd, (val) => {
 const buttonLabel = computed(() => {
   if (autoLoginCountdown.value > 0) {
     return `自动登录中 (${autoLoginCountdown.value}s) 点击取消`
+  }
+  if (loading.value) {
+    return '登录中… 点击取消'
   }
   return '登 录'
 })
@@ -137,6 +179,7 @@ function selectAccount(acct: SavedAccount) {
   showDropdown.value = false
   isTyping.value = false
   errMsg.value = ''
+  cachedAvatar.value = getAccountAvatar(acct.acctno)
   cancelAutoLogin()
 }
 
@@ -152,6 +195,7 @@ function onAcctInput() {
   isTyping.value = true
   showDropdown.value = true
   errMsg.value = ''
+  password.value = ''
   cancelAutoLogin()
 }
 
@@ -164,6 +208,22 @@ function onAcctBlur() {
     showDropdown.value = false
     isTyping.value = false
   }, 200)
+}
+
+let acctAreaLeaveTimer: ReturnType<typeof setTimeout> | null = null
+
+function onAcctAreaLeave() {
+  acctAreaLeaveTimer = setTimeout(() => {
+    showDropdown.value = false
+    isTyping.value = false
+  }, 300)
+}
+
+function cancelAcctAreaLeave() {
+  if (acctAreaLeaveTimer) {
+    clearTimeout(acctAreaLeaveTimer)
+    acctAreaLeaveTimer = null
+  }
 }
 
 function toggleDropdown() {
@@ -187,35 +247,75 @@ function goForgotPassword() {
 }
 
 onMounted(async () => {
+  logger.log('login', 'onMounted 开始')
+  await ensureLoginSize()
+
   savedAccounts.value = loadSavedAccounts()
+  logger.log('login', '已保存账号列表', savedAccounts.value.map(a => ({
+    acctno: a.acctno,
+    username: a.username,
+    hasAvatar: !!a.avatar,
+    avatarLen: a.avatar ? a.avatar.length : 0,
+  })))
 
   if (savedAccounts.value.length > 0) {
     const last = savedAccounts.value[0]
     acctno.value = last.acctno
     password.value = last.password
     rememberPwd.value = true
+    const av = getAccountAvatar(last.acctno)
+    if (av) cachedAvatar.value = av
+  }
+
+  if (!cachedAvatar.value) {
+    const userInfoRaw = localStorage.getItem('userInfo')
+    if (userInfoRaw) {
+      try {
+        const info = JSON.parse(userInfoRaw)
+        if (info.avatars) {
+          await userStore.cacheAvatar(info.avatars)
+          cachedAvatar.value = localStorage.getItem('avatar_data') || ''
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  if (cachedAvatar.value && acctno.value && !getAccountAvatar(acctno.value)) {
+    setAccountAvatar(acctno.value, cachedAvatar.value)
   }
 
   const [did, creds] = await Promise.all([getDeviceId(), getAppCredentials()])
   deviceId.value = did
   appId.value = creds.appId
 
-  await appWindow.show()
-  await appWindow.setFocus()
-
   if (userStore.isLoggedIn) {
-    logger.log('login', '检测到本地已有登录态，直接激活主窗口')
+    logger.log('login', '检测到本地已有登录态，直接切换到主布局')
     loading.value = true
-    await new Promise(resolve => setTimeout(resolve, 1500))
-    await activateMainWindow()
+    try {
+      await switchToMainLayout(router)
+    } catch (e) {
+      logger.error('login', '切换到主布局失败', e)
+    }
     loading.value = false
     return
   }
+
+  await showWindow()
+  logger.log('login', '无登录态，显示登录窗口')
 
   if (autoLogin.value && acctno.value && password.value) {
     startAutoLoginCountdown()
   }
 })
+
+function cancelLogin() {
+  if (loginAbortController) {
+    loginAbortController.abort()
+    loginAbortController = null
+  }
+  loading.value = false
+  errMsg.value = ''
+}
 
 async function handleLogin() {
   clearAutoLoginTimer()
@@ -229,6 +329,7 @@ async function handleLogin() {
     return
   }
 
+  loginAbortController = new AbortController()
   loading.value = true
   try {
     const res = await userLoginApi({
@@ -236,32 +337,51 @@ async function handleLogin() {
       acctno: acctno.value.trim(),
       password: password.value,
       device_id: deviceId.value,
-    })
+    }, { signal: loginAbortController.signal })
     if (res.token) {
       userStore.setToken(res.token as string)
     }
     const username = String((res.username ?? res.nickname ?? res.acctno ?? acctno.value.trim()) as string)
+    const avatarsPath = typeof res.avatars === 'string' ? res.avatars : undefined
     userStore.setUserInfo({
       id: Number((res.id ?? res.user_id ?? 0) as number | string),
       username,
       email: typeof res.email === 'string' ? res.email : undefined,
       phone: typeof res.phone === 'string' ? res.phone : undefined,
+      avatars: avatarsPath,
+      acctno: typeof res.acctno === 'string' ? res.acctno : undefined,
     })
 
+    if (avatarsPath) {
+      await userStore.cacheAvatar(avatarsPath)
+    }
+
+    const serverPhone = typeof res.phone === 'string' ? res.phone : undefined
+    const serverAcctno = typeof res.acctno === 'string' ? res.acctno : undefined
+
     if (rememberPwd.value) {
-      saveAccount({ acctno: acctno.value.trim(), password: password.value, username })
+      saveAccount(
+        { acctno: acctno.value.trim(), password: password.value, username, phone: serverPhone, altAcctno: serverAcctno },
+        serverPhone,
+        serverAcctno,
+      )
+      const avatarBase64 = localStorage.getItem('avatar_data') || ''
+      if (avatarBase64) setAccountAvatar(acctno.value.trim(), avatarBase64)
     } else {
       removeAccount(acctno.value.trim())
     }
 
     errMsg.value = ''
-    await activateMainWindow()
+    startHeartbeat(userStore.token)
+    await switchToMainLayout(router)
   } catch (err: unknown) {
+    if (err instanceof DOMException && err.name === 'AbortError') return
     errMsg.value = err instanceof Error ? err.message : '登录失败，请重试'
     logger.error('login', '登录失败', {
       message: err instanceof Error ? err.message : String(err),
     })
   } finally {
+    loginAbortController = null
     loading.value = false
   }
 }
@@ -269,6 +389,10 @@ async function handleLogin() {
 function handleButtonClick() {
   if (autoLoginCountdown.value > 0) {
     cancelAutoLogin()
+    return
+  }
+  if (loading.value) {
+    cancelLogin()
     return
   }
   handleLogin()
@@ -281,38 +405,31 @@ function onPasswordInput() {
 
 onUnmounted(() => {
   clearAutoLoginTimer()
+  cancelLogin()
 })
 </script>
 
 <template>
   <div class="window-shell">
     <div class="window-content">
-      <div class="banner" style="-webkit-app-region: drag">
-        <div class="login-window-actions" style="-webkit-app-region: no-drag">
-          <button class="login-win-btn" @click="handleMinimize" title="最小化">
-            <svg width="12" height="12" viewBox="0 0 12 12"><rect y="5" width="12" height="1.5" rx="0.75" fill="currentColor"/></svg>
-          </button>
-          <button class="login-win-btn login-win-btn--close" @click="handleCloseWindow" title="关闭">
-            <svg width="12" height="12" viewBox="0 0 12 12">
-              <path d="M1.5 1.5L10.5 10.5M10.5 1.5L1.5 10.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
-            </svg>
-          </button>
-        </div>
+      <TitleBar variant="auth" />
+      <div class="banner">
         <div class="bc bc-1"></div>
         <div class="bc bc-2"></div>
         <div class="bc bc-3"></div>
-        <div class="logo-text">青拾</div>
+        <div class="banner-title">登录</div>
       </div>
 
       <div class="body">
         <div class="avatar-ring">
           <div class="avatar">
-            <i class="pi pi-user"></i>
+            <img v-if="cachedAvatar" :src="cachedAvatar" class="avatar-img" alt="头像" />
+            <i v-else class="pi pi-user"></i>
           </div>
         </div>
 
         <form class="form" @submit.prevent="handleLogin">
-          <div class="field-box acct-field">
+          <div class="field-box acct-field" @mouseleave="onAcctAreaLeave" @mouseenter="cancelAcctAreaLeave">
             <div class="acct-input-wrap">
               <InputText
                 v-model="acctno"
@@ -342,10 +459,13 @@ onUnmounted(() => {
                   class="acct-item"
                   @mousedown.prevent="selectAccount(acct)"
                 >
-                  <div class="acct-item-avatar">{{ (acct.username || acct.acctno).charAt(0) }}</div>
+                  <div class="acct-item-avatar">
+                    <img v-if="getAccountAvatar(acct.acctno)" :src="getAccountAvatar(acct.acctno)" class="acct-avatar-img" alt="" />
+                    <span v-else>{{ (acct.username || acct.acctno).charAt(0) }}</span>
+                  </div>
                   <div class="acct-item-info">
                     <div class="acct-item-name">{{ acct.username || maskPhone(acct.acctno) }}</div>
-                    <div class="acct-item-phone">{{ maskPhone(acct.acctno) }}</div>
+                    <div class="acct-item-phone">{{ maskPhone(acct.phone || acct.acctno) }}</div>
                   </div>
                   <button
                     type="button"
@@ -398,7 +518,7 @@ onUnmounted(() => {
           <Button
             type="button"
             :label="buttonLabel"
-            :loading="loading && autoLoginCountdown === 0"
+            :icon="loading && autoLoginCountdown === 0 ? 'pi pi-spin pi-spinner' : undefined"
             class="submit-btn"
             @click="handleButtonClick"
           />
@@ -406,6 +526,10 @@ onUnmounted(() => {
 
         <div class="bottom-links">
           <a class="bottom-link" href="#" @click.prevent="goRegister">注册账号</a>
+          <span class="bottom-sep">|</span>
+          <a class="bottom-link" href="#" @click.prevent="router.push('/recharge')">卡密充值</a>
+          <span class="bottom-sep">|</span>
+          <a class="bottom-link" href="#" @click.prevent="router.push('/unbind-device')">解绑设备</a>
         </div>
       </div>
     </div>
@@ -436,64 +560,30 @@ onUnmounted(() => {
 }
 
 .banner {
-  height: 150px;
+  height: 140px;
   position: relative;
   background: var(--qs-bg-gradient);
   flex-shrink: 0;
-  overflow: hidden;
+  overflow: visible;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-top: 10px;
-}
-
-.login-window-actions {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  z-index: 10;
-}
-
-.login-win-btn {
-  width: 30px;
-  height: 26px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  background: transparent;
-  color: rgba(255, 255, 255, 0.75);
-  cursor: pointer;
-  border-radius: 6px;
-  transition: all 0.15s;
-}
-
-.login-win-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
-}
-
-.login-win-btn--close:hover {
-  background: #ef4444;
-  color: #fff;
 }
 
 .bc {
   position: absolute;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.07);
+  pointer-events: none;
 }
-.bc-1 { width: 200px; height: 200px; top: -70px; right: -40px; }
-.bc-2 { width: 120px; height: 120px; bottom: -40px; left: 20px; }
-.bc-3 { width: 70px; height: 70px; top: 25px; left: 38%; background: rgba(255,255,255,0.05); }
+.bc-1 { width: 200px; height: 200px; top: -100px; right: -40px; }
+.bc-2 { width: 120px; height: 120px; bottom: -60px; left: 20px; }
+.bc-3 { width: 70px; height: 70px; top: 10px; left: 38%; background: rgba(255,255,255,0.05); }
 
-.logo-text {
+.banner-title {
   position: relative;
   z-index: 1;
-  font-size: 2.6rem;
+  font-size: 1.8rem;
   font-weight: 700;
   color: #fff;
   letter-spacing: 0.15em;
@@ -505,36 +595,45 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 0 40px 24px;
+  padding: 0 40px 0;
+  min-height: 0;
 }
 
 .avatar-ring {
-  margin-top: -34px;
-  margin-bottom: 24px;
+  margin-top: -44px;
+  margin-bottom: 14px;
   z-index: 2;
-  padding: 3px;
+  padding: 4px;
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 4px 20px rgba(13, 148, 136, 0.12);
+  flex-shrink: 0;
 }
 
 .avatar {
-  width: 64px;
-  height: 64px;
+  width: 80px;
+  height: 80px;
   border-radius: 50%;
   background: linear-gradient(135deg, #ccfbf1, #f0fdfa);
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--qs-primary);
-  font-size: 1.6rem;
+  font-size: 2rem;
+  overflow: hidden;
+}
+
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .form {
   width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
 .field-box {
@@ -619,6 +718,13 @@ onUnmounted(() => {
   font-size: 0.82rem;
   font-weight: 600;
   flex-shrink: 0;
+  overflow: hidden;
+}
+
+.acct-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .acct-item-info {
@@ -780,14 +886,15 @@ onUnmounted(() => {
 
 .bottom-links {
   margin-top: auto;
-  padding: 16px 0 12px;
+  padding: 12px 0 14px;
   text-align: center;
+  flex-shrink: 0;
 }
 
 .bottom-link {
   display: inline-block;
-  padding: 6px 16px;
-  font-size: 0.85rem;
+  padding: 6px 10px;
+  font-size: 0.82rem;
   color: var(--qs-primary);
   text-decoration: none;
   font-weight: 500;
@@ -797,5 +904,10 @@ onUnmounted(() => {
 
 .bottom-link:hover {
   color: var(--qs-primary-dark);
+}
+
+.bottom-sep {
+  color: #cbd5e1;
+  font-size: 0.8rem;
 }
 </style>

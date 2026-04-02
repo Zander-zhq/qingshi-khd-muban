@@ -1,9 +1,9 @@
 use tauri::Manager;
+use tauri::Emitter;
 use tauri::AppHandle;
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::menu::{MenuBuilder, MenuItemBuilder, CheckMenuItemBuilder, CheckMenuItem, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::image::Image;
-use tauri::webview::WebviewWindowBuilder;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -12,10 +12,28 @@ use sha2::Sha256;
 use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const APP_ID: &str = "1004";
-const APP_KEY: &str = "7cdba759d52ba9524374d161d47e8bf6";
+const APP_ID: &str = "1001";
+const APP_KEY: &str = "fb6837e15f113ca32d0a838272f3f659";
 
 type HmacSha256 = Hmac<Sha256>;
+
+struct TrayChecks {
+    autostart_on: CheckMenuItem<tauri::Wry>,
+    autostart_off: CheckMenuItem<tauri::Wry>,
+    close_exit: CheckMenuItem<tauri::Wry>,
+    close_minimize: CheckMenuItem<tauri::Wry>,
+}
+
+#[tauri::command]
+fn sync_tray_checks(app: AppHandle, autostart: bool, close_mode: String) -> Result<(), String> {
+    if let Some(state) = app.try_state::<TrayChecks>() {
+        let _ = state.autostart_on.set_checked(autostart);
+        let _ = state.autostart_off.set_checked(!autostart);
+        let _ = state.close_exit.set_checked(close_mode == "exit");
+        let _ = state.close_minimize.set_checked(close_mode == "minimize");
+    }
+    Ok(())
+}
 
 #[cfg(target_os = "windows")]
 fn apply_rounded_corners(window: &tauri::WebviewWindow) {
@@ -36,105 +54,22 @@ fn apply_rounded_corners(window: &tauri::WebviewWindow) {
     }
 }
 
-// #region agent log
-fn dbg_log(loc: &str, msg: &str, data: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(r"e:\qingshi\client_shipinxiazai\debug-23ef92.log") {
-        let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-        let _ = writeln!(f, r#"{{"sessionId":"23ef92","location":"{}","message":"{}","data":{},"timestamp":{}}}"#, loc, msg, data, ts);
-    }
-}
-// #endregion
-
 #[tauri::command]
-fn activate_main_window(app: AppHandle) -> Result<(), String> {
-    // #region agent log
-    dbg_log("lib.rs:activate_main_window:entry", "activate_main_window called", "{}");
-    // #endregion
-
-    if let Some(login) = app.get_webview_window("login") {
-        let _ = login.hide();
-    }
-
-    if let Some(main) = app.get_webview_window("main") {
-        // #region agent log
-        dbg_log("lib.rs:activate_main_window:existing", "main window already exists, showing", "{}");
-        // #endregion
-        main.show().map_err(|e| format!("显示主窗口失败: {}", e))?;
-        main.set_focus().map_err(|e| format!("聚焦主窗口失败: {}", e))?;
-        return Ok(());
-    }
-
-    // #region agent log
-    dbg_log("lib.rs:activate_main_window:creating", "creating new main window via run_on_main_thread", "{}");
-    // #endregion
-
-    let app_handle = app.clone();
-    app.run_on_main_thread(move || {
-        // #region agent log
-        dbg_log("lib.rs:activate_main_window:on_main_thread", "now on main thread, building window", "{}");
-        // #endregion
-
-        let build_result = WebviewWindowBuilder::new(
-            &app_handle,
-            "main",
-            tauri::WebviewUrl::App("/main/dashboard".into()),
-        )
-        .title("青拾")
-        .inner_size(1440.0, 900.0)
-        .min_inner_size(1200.0, 760.0)
-        .center()
-        .decorations(false)
-        .shadow(true)
-        .resizable(true)
-        .visible(false)
-        .build();
-
-        match build_result {
-            Ok(main) => {
-                // #region agent log
-                dbg_log("lib.rs:activate_main_window:build_ok", "window build succeeded on main thread", "{}");
-                // #endregion
-
-                #[cfg(target_os = "windows")]
-                apply_rounded_corners(&main);
-
-                let handle = main.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(800));
-                    // #region agent log
-                    dbg_log("lib.rs:activate_main_window:thread", "thread show/focus", "{}");
-                    // #endregion
-                    let _ = handle.show();
-                    let _ = handle.set_focus();
-                });
-            }
-            Err(e) => {
-                // #region agent log
-                dbg_log("lib.rs:activate_main_window:build_err", "window build FAILED", &format!(r#"{{"error":"{}"}}"#, e));
-                // #endregion
-                if let Some(login) = app_handle.get_webview_window("login") {
-                    let _ = login.show();
-                    let _ = login.set_focus();
-                }
-            }
-        }
-    }).map_err(|e| format!("dispatch to main thread failed: {}", e))?;
-
+fn prepare_window(app: AppHandle, width: f64, height: f64, min_width: f64, min_height: f64, resizable: bool) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("窗口不存在")?;
+    window.hide().map_err(|e| format!("hide 失败: {}", e))?;
+    window.set_size(tauri::LogicalSize::new(width, height)).map_err(|e| format!("setSize 失败: {}", e))?;
+    window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize { width: min_width, height: min_height }))).map_err(|e| format!("setMinSize 失败: {}", e))?;
+    window.set_resizable(resizable).map_err(|e| format!("setResizable 失败: {}", e))?;
+    window.center().map_err(|e| format!("center 失败: {}", e))?;
     Ok(())
 }
 
 #[tauri::command]
-fn activate_login_window(app: AppHandle) -> Result<(), String> {
-    if let Some(login) = app.get_webview_window("login") {
-        login.show().map_err(|e| format!("显示登录窗口失败: {}", e))?;
-        login.set_focus().map_err(|e| format!("聚焦登录窗口失败: {}", e))?;
-    }
-
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.close();
-    }
-
+fn reveal_window(app: AppHandle) -> Result<(), String> {
+    let window = app.get_webview_window("main").ok_or("窗口不存在")?;
+    window.show().map_err(|e| format!("show 失败: {}", e))?;
+    window.set_focus().map_err(|e| format!("setFocus 失败: {}", e))?;
     Ok(())
 }
 
@@ -246,40 +181,65 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![
             get_device_id,
             get_app_credentials,
             compute_sign,
-            activate_main_window,
-            activate_login_window,
-            exit_app
+            prepare_window,
+            reveal_window,
+            exit_app,
+            sync_tray_checks
         ])
         .setup(|app| {
-            if let Some(window) = app.get_webview_window("login") {
+            if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "windows")]
                 apply_rounded_corners(&window);
             }
 
             let show_item = MenuItemBuilder::with_id("show", "显示窗口").build(app)?;
+            let refresh_item = MenuItemBuilder::with_id("refresh", "刷新界面").build(app)?;
+            let clear_cache_item = MenuItemBuilder::with_id("clear_cache", "清理缓存").build(app)?;
+
+            let autostart_on = CheckMenuItemBuilder::with_id("autostart_on", "开启").build(app)?;
+            let autostart_off = CheckMenuItemBuilder::with_id("autostart_off", "关闭").checked(true).build(app)?;
+            let autostart_sub = SubmenuBuilder::with_id(app, "autostart_sub", "开机自启")
+                .item(&autostart_on)
+                .item(&autostart_off)
+                .build()?;
+
+            let close_exit = CheckMenuItemBuilder::with_id("close_exit", "直接退出").checked(true).build(app)?;
+            let close_minimize = CheckMenuItemBuilder::with_id("close_minimize", "最小化到后台").build(app)?;
+            let close_sub = SubmenuBuilder::with_id(app, "close_sub", "关闭设置")
+                .item(&close_exit)
+                .item(&close_minimize)
+                .build()?;
+
+            app.manage(TrayChecks {
+                autostart_on: autostart_on.clone(),
+                autostart_off: autostart_off.clone(),
+                close_exit: close_exit.clone(),
+                close_minimize: close_minimize.clone(),
+            });
+
+            let about_item = MenuItemBuilder::with_id("about", "关于").build(app)?;
             let exit_item = MenuItemBuilder::with_id("exit", "退出程序").build(app)?;
+
             let tray_menu = MenuBuilder::new(app)
                 .item(&show_item)
                 .separator()
+                .item(&refresh_item)
+                .item(&clear_cache_item)
+                .separator()
+                .item(&autostart_sub)
+                .item(&close_sub)
+                .separator()
+                .item(&about_item)
                 .item(&exit_item)
                 .build()?;
 
             let icon = Image::from_path("icons/icon.png")
                 .unwrap_or_else(|_| Image::from_bytes(include_bytes!("../icons/icon.png")).expect("内置图标加载失败"));
-
-            fn show_active_window(app: &AppHandle) {
-                if let Some(main) = app.get_webview_window("main") {
-                    let _ = main.show();
-                    let _ = main.set_focus();
-                } else if let Some(login) = app.get_webview_window("login") {
-                    let _ = login.show();
-                    let _ = login.set_focus();
-                }
-            }
 
             let _tray = TrayIconBuilder::new()
                 .icon(icon)
@@ -287,14 +247,53 @@ pub fn run() {
                 .menu(&tray_menu)
                 .on_menu_event(|app: &AppHandle, event| {
                     match event.id().as_ref() {
-                        "show" => show_active_window(app),
+                        "show" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                        }
+                        "refresh" | "clear_cache" | "about" => {
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                            let _ = app.emit("tray-action", event.id().as_ref());
+                        }
+                        "autostart_on" | "autostart_off" => {
+                            let is_on = event.id().as_ref() == "autostart_on";
+                            if let Some(state) = app.try_state::<TrayChecks>() {
+                                let _ = state.autostart_on.set_checked(is_on);
+                                let _ = state.autostart_off.set_checked(!is_on);
+                            }
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                            let _ = app.emit("tray-action", event.id().as_ref());
+                        }
+                        "close_exit" | "close_minimize" => {
+                            let is_exit = event.id().as_ref() == "close_exit";
+                            if let Some(state) = app.try_state::<TrayChecks>() {
+                                let _ = state.close_exit.set_checked(is_exit);
+                                let _ = state.close_minimize.set_checked(!is_exit);
+                            }
+                            if let Some(w) = app.get_webview_window("main") {
+                                let _ = w.show();
+                                let _ = w.set_focus();
+                            }
+                            let _ = app.emit("tray-action", event.id().as_ref());
+                        }
                         "exit" => app.exit(0),
                         _ => {}
                     }
                 })
                 .on_tray_icon_event(|tray: &tauri::tray::TrayIcon, event| {
                     if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
-                        show_active_window(tray.app_handle());
+                        if let Some(w) = tray.app_handle().get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
                     }
                 })
                 .build(app)?;
