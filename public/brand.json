@@ -1,0 +1,11 @@
+{
+  "id": "qingshi",
+  "brand_name": "青拾",
+  "product_name": "视频下载",
+  "template": "green",
+  "logo": "app-icon.png",
+  "window_title": "青拾·视频下载",
+  "about": "© 2024-2026 青拾",
+  "login_size": { "width": 420, "height": 640 },
+  "main_size": { "width": 1440, "height": 900, "minWidth": 1200, "minHeight": 760 }
+}
