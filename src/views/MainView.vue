@@ -1,12 +1,59 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useUserStore } from '../stores/user'
+
+const APP_BRAND = '青拾'
+const APP_PRODUCT = '视频下载'
+const APP_VERSION = 'V1.1.1'
 
 const userStore = useUserStore()
 
-const displayName = computed(() => {
-  if (userStore.userInfo?.username) return userStore.userInfo.username
-  return '用户'
+const displayName = computed(() => userStore.userInfo?.username || '用户')
+
+const memberInfo = computed(() => {
+  const info = userStore.userInfo
+  if (!info) return { label: '会员状态', value: '未知' }
+
+  if (info.app_mode === 'points') {
+    return { label: '剩余积分', value: info.fen !== undefined ? String(info.fen) : '0' }
+  }
+
+  if (info.vip_expire_at) {
+    const d = new Date(info.vip_expire_at)
+    const now = new Date()
+    const isExpired = d.getTime() < now.getTime()
+    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    return { label: '到期时间', value: isExpired ? `已到期 (${dateStr})` : dateStr }
+  }
+
+  return { label: '到期时间', value: '永久' }
+})
+
+const currentTime = ref('')
+const currentDate = ref('')
+let clockTimer: ReturnType<typeof setInterval> | null = null
+
+function updateClock() {
+  const now = new Date()
+  const h = String(now.getHours()).padStart(2, '0')
+  const m = String(now.getMinutes()).padStart(2, '0')
+  const s = String(now.getSeconds()).padStart(2, '0')
+  currentTime.value = `${h}:${m}:${s}`
+
+  const year = now.getFullYear()
+  const month = now.getMonth() + 1
+  const day = now.getDate()
+  const weekdays = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六']
+  currentDate.value = `${year}年${month}月${day}日${weekdays[now.getDay()]}`
+}
+
+onMounted(() => {
+  updateClock()
+  clockTimer = setInterval(updateClock, 1000)
+})
+
+onUnmounted(() => {
+  if (clockTimer) clearInterval(clockTimer)
 })
 </script>
 
@@ -14,45 +61,34 @@ const displayName = computed(() => {
   <div class="dashboard-page">
     <section class="hero-card">
       <div>
-        <div class="hero-kicker">青拾客户端</div>
+        <div class="hero-kicker">{{ APP_BRAND }} · {{ APP_PRODUCT }} {{ APP_VERSION }}</div>
         <h1>欢迎回来，{{ displayName }}</h1>
-        <p>主窗口已经独立出来了，后续功能页面都会加载在右侧工作区。</p>
       </div>
       <div class="hero-time">
-        <div class="time-label">当前状态</div>
-        <div class="time-value">在线</div>
+        <div class="time-value">{{ currentTime }}</div>
+        <div class="time-date">{{ currentDate }}</div>
       </div>
     </section>
 
     <section class="metric-grid">
       <div class="metric-card">
-        <span>登录状态</span>
-        <strong>{{ userStore.isLoggedIn ? '有效' : '无效' }}</strong>
+        <span>{{ memberInfo.label }}</span>
+        <strong>{{ memberInfo.value }}</strong>
       </div>
       <div class="metric-card">
         <span>当前账号</span>
-        <strong>{{ userStore.userInfo?.username || '未返回资料' }}</strong>
+        <strong>{{ userStore.userInfo?.username || '未设置' }}</strong>
       </div>
       <div class="metric-card">
         <span>手机号</span>
-        <strong>{{ userStore.userInfo?.phone || '未返回' }}</strong>
+        <strong>{{ userStore.userInfo?.phone || '未绑定' }}</strong>
       </div>
       <div class="metric-card">
         <span>邮箱</span>
-        <strong>{{ userStore.userInfo?.email || '未返回' }}</strong>
+        <strong>{{ userStore.userInfo?.email || '未绑定' }}</strong>
       </div>
     </section>
 
-    <section class="panel-grid">
-      <div class="panel-card">
-        <div class="panel-title">功能区</div>
-        <p>这里后面可以接视频任务、下载中心、配置管理等页面。</p>
-      </div>
-      <div class="panel-card">
-        <div class="panel-title">开发说明</div>
-        <p>当前已经完成独立主窗口、左侧菜单、顶部用户区和内容工作区的基础骨架。</p>
-      </div>
-    </section>
   </div>
 </template>
 
@@ -64,7 +100,7 @@ const displayName = computed(() => {
 }
 
 .hero-card {
-  min-height: 160px;
+  min-height: 140px;
   border-radius: 20px;
   padding: 28px 30px;
   background: linear-gradient(135deg, #0f766e 0%, #0d9488 42%, #2dd4bf 100%);
@@ -78,48 +114,40 @@ const displayName = computed(() => {
 
 .hero-kicker {
   font-size: 0.82rem;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.12em;
   opacity: 0.88;
   margin-bottom: 10px;
 }
 
 .hero-card h1 {
-  font-size: 2rem;
-  margin-bottom: 10px;
-}
-
-.hero-card p {
-  font-size: 0.92rem;
-  line-height: 1.7;
-  max-width: 520px;
-  color: rgba(255, 255, 255, 0.92);
+  font-size: 1.8rem;
+  margin: 0;
 }
 
 .hero-time {
-  min-width: 160px;
+  min-width: 180px;
   text-align: right;
 }
 
-.time-label {
-  font-size: 0.8rem;
-  opacity: 0.82;
-  margin-bottom: 10px;
-}
-
 .time-value {
-  font-size: 2rem;
+  font-size: 2.2rem;
   font-weight: 700;
+  letter-spacing: 0.05em;
 }
 
-.metric-grid,
-.panel-grid {
+.time-date {
+  font-size: 0.82rem;
+  opacity: 0.82;
+  margin-top: 4px;
+}
+
+.metric-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
 }
 
-.metric-card,
-.panel-card {
+.metric-card {
   background: #fff;
   border-radius: 18px;
   padding: 18px 20px;
@@ -138,16 +166,4 @@ const displayName = computed(() => {
   font-size: 1.2rem;
 }
 
-.panel-title {
-  font-size: 0.95rem;
-  font-weight: 700;
-  color: #0f172a;
-  margin-bottom: 8px;
-}
-
-.panel-card p {
-  color: #64748b;
-  line-height: 1.7;
-  font-size: 0.88rem;
-}
 </style>

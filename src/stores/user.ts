@@ -9,6 +9,9 @@ export interface UserInfo {
   phone?: string
   avatars?: string
   acctno?: string
+  vip_expire_at?: string
+  fen?: number
+  app_mode?: 'card' | 'points'
 }
 
 const AVATAR_DATA_KEY = 'avatar_data'

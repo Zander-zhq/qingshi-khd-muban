@@ -350,6 +350,9 @@ async function handleLogin() {
       phone: typeof res.phone === 'string' ? res.phone : undefined,
       avatars: avatarsPath,
       acctno: typeof res.acctno === 'string' ? res.acctno : undefined,
+      vip_expire_at: typeof res.vip_expire_at === 'string' ? res.vip_expire_at : undefined,
+      fen: typeof res.fen === 'number' ? res.fen : undefined,
+      app_mode: res.app_mode === 'points' ? 'points' : 'card',
     })
 
     if (avatarsPath) {

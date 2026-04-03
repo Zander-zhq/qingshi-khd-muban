@@ -80,7 +80,9 @@ onMounted(() => {
       showExpired.value = true
       forceExpired.value = true
     },
-    async onSessionExpired() {
+    async onSessionExpired(msg) {
+      logger.warn('main-layout', '会话过期，即将跳转登录', { msg })
+      await showDialog({ title: '登录已过期', message: msg || '您的登录已过期，请重新登录' })
       userStore.logout()
       await switchToLoginLayout(router)
     },
