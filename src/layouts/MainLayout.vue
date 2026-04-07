@@ -9,8 +9,9 @@ import { logger } from '../utils/logger'
 import { switchToLoginLayout } from '../utils/window'
 import { startHeartbeat, stopHeartbeat, callLogoutApi, setHeartbeatCallbacks } from '../utils/heartbeat'
 import { showDialog } from '../utils/dialog'
-import { post } from '../utils/request'
-import { updateProfileApi, uploadAvatarApi, sendEmailCodeApi, bindEmailApi, changePasswordApi, redeemCardInnerApi, unbindDeviceInnerApi } from '../api/auth'
+import { updateProfileApi, sendEmailCodeApi, bindEmailApi, changePasswordApi, redeemCardInnerApi, unbindDeviceInnerApi } from '../api/auth'
+import { uploadImage } from '../api/brand'
+import { getBrand } from '../brand'
 import { getAppCredentials, getUnbindTip } from '../utils/config'
 
 const route = useRoute()
@@ -244,8 +245,11 @@ async function submitProfile() {
     let changed = false
 
     if (profileAvatarFile.value) {
-      const uploadRes = await uploadAvatarApi(userStore.token, profileAvatarFile.value)
-      newAvatarUrl = (uploadRes as any).url || ''
+      const uploadRes = await uploadImage(userStore.token, profileAvatarFile.value, 'avatar', {
+        brandId: getBrand().id,
+        phone: userStore.userInfo?.phone || '',
+      })
+      newAvatarUrl = uploadRes.url || ''
       profileAvatarFile.value = null
       changed = true
     }
@@ -265,6 +269,7 @@ async function submitProfile() {
     const changedFields: Record<string, string> = {}
     if (profileNickname.value !== (userStore.userInfo?.username || '')) changedFields.nickname = profileNickname.value
     if (profileAcctno.value !== (userStore.userInfo?.acctno || '')) changedFields.acctno = profileAcctno.value
+    if (newAvatarUrl) changedFields.avatars = newAvatarUrl
 
     if (Object.keys(changedFields).length > 0) {
       const res = await updateProfileApi({ token: userStore.token, ...changedFields })
@@ -274,8 +279,6 @@ async function submitProfile() {
         avatars: (res as any).avatars || newAvatarUrl || userStore.userInfo?.avatars,
       })
       changed = true
-    } else if (newAvatarUrl) {
-      userStore.updateUserInfo({ avatars: newAvatarUrl })
     }
 
     profileSuccessMsg.value = changed ? '保存成功' : '没有需要修改的内容'

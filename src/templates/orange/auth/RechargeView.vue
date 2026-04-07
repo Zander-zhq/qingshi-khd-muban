@@ -6,109 +6,74 @@ import Button from 'primevue/button'
 import TitleBar from '../TitleBar.vue'
 import { redeemCardApi } from '../../../api/auth'
 import { getAppCredentials } from '../../../utils/config'
+import { getBrand, getBrandLogo, VERSION } from '../../../brand'
 
+const brand = getBrand()
+const brandLogo = getBrandLogo()
 const router = useRouter()
 const appId = ref('')
 
-onMounted(async () => {
-  const creds = await getAppCredentials()
-  appId.value = creds.appId
-})
+onMounted(async () => { const creds = await getAppCredentials(); appId.value = creds.appId })
 
-const acctno = ref('')
-const cardKey = ref('')
-const loading = ref(false)
-const errMsg = ref('')
-const successMsg = ref('')
+const acctno = ref(''); const cardKey = ref('')
+const loading = ref(false); const errMsg = ref(''); const successMsg = ref('')
 
-function clearMsg() {
-  errMsg.value = ''
-  successMsg.value = ''
-}
+function clearMsg() { errMsg.value = ''; successMsg.value = '' }
 
 async function handleRecharge() {
   clearMsg()
-
   if (!acctno.value.trim()) { errMsg.value = '请输入账号（手机号）'; return }
   if (!cardKey.value.trim()) { errMsg.value = '请输入卡密'; return }
 
   loading.value = true
   try {
-    const res = await redeemCardApi({
-      app_id: appId.value,
-      acctno: acctno.value.trim(),
-      card_key: cardKey.value.trim(),
-    })
-    const cardType = (res as any).card_type || ''
-    const expireAt = (res as any).vip_expire_at || ''
+    const res = await redeemCardApi({ app_id: appId.value, acctno: acctno.value.trim(), card_key: cardKey.value.trim() })
+    const cardType = (res as any).card_type || ''; const expireAt = (res as any).vip_expire_at || ''
     let msg = '充值成功！'
     if (cardType) msg += ` (${cardType})`
-    if (expireAt) {
-      const d = new Date(expireAt)
-      msg += `  到期：${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-    }
-    successMsg.value = msg
-    cardKey.value = ''
+    if (expireAt) { const d = new Date(expireAt); msg += `  到期：${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}` }
+    successMsg.value = msg; cardKey.value = ''
     setTimeout(() => router.push('/login'), 1500)
-  } catch (err: unknown) {
-    errMsg.value = err instanceof Error ? err.message : '充值失败'
-  } finally {
-    loading.value = false
-  }
+  } catch (err: unknown) { errMsg.value = err instanceof Error ? err.message : '充值失败' }
+  finally { loading.value = false }
 }
 </script>
 
 <template>
-  <div class="window-shell">
-    <div class="window-content">
-      <TitleBar variant="auth" />
-      <div class="banner">
-        <div class="bc bc-1"></div>
-        <div class="bc bc-2"></div>
-        <div class="banner-title">卡密充值</div>
+  <div class="page-shell">
+    <TitleBar variant="auth" />
+    <div class="page-split">
+      <div class="left-panel">
+        <div class="lp-deco lp-deco-1"></div>
+        <div class="lp-deco lp-deco-2"></div>
+        <div class="lp-content">
+          <img :src="brandLogo" alt="" class="lp-logo" />
+          <h1 class="lp-title">{{ brand.brand_name }}</h1>
+          <p class="lp-sub">{{ brand.product_name }}</p>
+          <div class="lp-divider"></div>
+          <p class="lp-hint">输入卡密即可充值会员</p>
+        </div>
+        <div class="lp-ver">{{ VERSION }}</div>
       </div>
 
-      <div class="body">
-        <div class="form-area">
+      <div class="right-panel">
+        <div class="rp-content">
+          <h2 class="rp-title">卡密充值</h2>
+          <p class="rp-desc">请输入账号和卡密进行充值</p>
+
           <form class="form" @submit.prevent="handleRecharge">
-            <div class="field-box">
-              <InputText
-                v-model="acctno"
-                placeholder="账号（手机号）"
-                class="field-input"
-                @input="clearMsg"
-              />
-            </div>
-
-            <div class="field-box">
-              <InputText
-                v-model="cardKey"
-                placeholder="卡密"
-                class="field-input"
-                @input="clearMsg"
-              />
-            </div>
-
+            <div class="field"><div class="input-box"><i class="pi pi-user input-icon"></i><InputText v-model="acctno" placeholder="账号（手机号）" class="gk-input" @input="clearMsg" /></div></div>
+            <div class="field"><div class="input-box"><i class="pi pi-credit-card input-icon"></i><InputText v-model="cardKey" placeholder="卡密" class="gk-input" @input="clearMsg" /></div></div>
             <Transition name="fade">
-              <div v-if="errMsg" class="msg-tip msg-err">
-                <i class="pi pi-exclamation-circle"></i>
-                {{ errMsg }}
-              </div>
-              <div v-else-if="successMsg" class="msg-tip msg-ok">
-                <i class="pi pi-check-circle"></i>
-                {{ successMsg }}
-              </div>
+              <div v-if="errMsg" class="msg msg--err"><i class="pi pi-exclamation-circle"></i>{{ errMsg }}</div>
+              <div v-else-if="successMsg" class="msg msg--ok"><i class="pi pi-check-circle"></i>{{ successMsg }}</div>
             </Transition>
-
             <Button type="submit" label="充 值" :loading="loading" class="submit-btn" />
           </form>
-        </div>
 
-        <div class="bottom-links">
-          <a href="#" class="link-text" @click.prevent="router.push('/login')">
-            <i class="pi pi-arrow-left" style="font-size: 0.7rem"></i>
-            返回登录
-          </a>
+          <div class="rp-links">
+            <a href="#" @click.prevent="router.push('/login')"><i class="pi pi-arrow-left"></i> 返回登录</a>
+          </div>
         </div>
       </div>
     </div>
@@ -116,67 +81,5 @@ async function handleRecharge() {
 </template>
 
 <style scoped>
-.window-shell { height: 100vh; width: 100vw; background: #fff; }
-.window-content { height: 100%; width: 100%; display: flex; flex-direction: column; background: #fff; overflow: hidden; }
-
-.banner {
-  height: 100px;
-  position: relative;
-  background: linear-gradient(135deg, #F97316, #EA580C);
-  flex-shrink: 0;
-  overflow: visible;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.bc { position: absolute; border-radius: 50%; background: rgba(255, 255, 255, 0.07); pointer-events: none; }
-.bc-1 { width: 140px; height: 140px; top: -50px; right: -20px; }
-.bc-2 { width: 80px; height: 80px; bottom: -30px; left: 10px; }
-
-.banner-title {
-  position: relative; z-index: 1; font-size: 1.4rem; font-weight: 700;
-  color: #fff; letter-spacing: 0.12em; text-shadow: 0 1px 8px rgba(0, 0, 0, 0.1);
-}
-
-.body { flex: 1; display: flex; flex-direction: column; padding: 0 36px; min-height: 0; }
-.form-area { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-.form { width: 100%; display: flex; flex-direction: column; gap: 14px; }
-.field-box { width: 100%; }
-
-.field-box :deep(.field-input),
-:deep(.field-pw .field-input) {
-  width: 100%; height: 44px; font-size: 0.92rem;
-  border: 1.5px solid #fed7aa; border-radius: 16px; background: #fffbf5;
-  padding: 0 16px; transition: all 0.2s; color: #7C2D12;
-}
-
-:deep(.field-pw) { width: 100%; }
-
-.field-box :deep(.field-input:focus),
-:deep(.field-pw .field-input:focus) {
-  border-color: #F97316; background: #fff;
-  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.1);
-}
-
-.msg-tip { display: flex; align-items: center; gap: 6px; font-size: 0.82rem; padding: 8px 12px; border-radius: 12px; }
-.msg-err { color: #dc2626; background: #fef2f2; border: 1px solid #fecaca; }
-.msg-ok { color: #EA580C; background: #fff7ed; border: 1px solid #fed7aa; }
-
-.fade-enter-active, .fade-leave-active { transition: all 0.25s ease; }
-.fade-enter-from, .fade-leave-to { opacity: 0; transform: translateY(-4px); }
-
-.submit-btn {
-  width: 100%; height: 44px; font-size: 1rem; font-weight: 600;
-  border-radius: 22px; margin-top: 4px;
-  background: linear-gradient(135deg, #F97316, #EA580C) !important;
-  border: none !important;
-  box-shadow: 0 4px 16px rgba(249, 115, 22, 0.35); transition: all 0.2s;
-}
-
-.submit-btn:hover { box-shadow: 0 6px 24px rgba(249, 115, 22, 0.45); transform: translateY(-1px); }
-
-.bottom-links { flex-shrink: 0; padding: 16px 0 14px; display: flex; justify-content: center; }
-.link-text { font-size: 0.85rem; color: #F97316; text-decoration: none; font-weight: 500; transition: color 0.15s; display: inline-flex; align-items: center; gap: 4px; }
-.link-text:hover { color: #EA580C; }
+@import './auth-shared.css';
 </style>

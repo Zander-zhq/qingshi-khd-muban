@@ -8,11 +8,15 @@ import Checkbox from 'primevue/checkbox'
 import TitleBar from '../TitleBar.vue'
 import { userLoginApi } from '../../../api/auth'
 import { useUserStore } from '../../../stores/user'
+import { useCheckin } from '../../../composables/useCheckin'
+import { getBrand } from '../../../brand'
 import { getDeviceId } from '../../../utils/device'
 import { getAppCredentials } from '../../../utils/config'
 import { logger } from '../../../utils/logger'
 import { switchToMainLayout, showWindow, ensureLoginSize } from '../../../utils/window'
 import { startHeartbeat } from '../../../utils/heartbeat'
+import { appStorage } from '../../../utils/storage'
+import { toFullUrl } from '../../../stores/user'
 
 interface SavedAccount {
   acctno: string
@@ -20,31 +24,32 @@ interface SavedAccount {
   username?: string
   phone?: string
   altAcctno?: string
+  avatarPath?: string
 }
 
 const ACCOUNTS_KEY = 'saved_accounts'
 
 function getAccountAvatar(acctno: string): string {
-  return localStorage.getItem(`avatar_${acctno}`) || ''
+  return appStorage.getItem(`avatar_${acctno}`) || ''
 }
 
 function setAccountAvatar(acctno: string, data: string) {
   if (!data) return
-  try { localStorage.setItem(`avatar_${acctno}`, data) } catch { /* quota */ }
+  try { appStorage.setItem(`avatar_${acctno}`, data) } catch { /* quota */ }
 }
 
 function removeAccountAvatar(acctno: string) {
-  localStorage.removeItem(`avatar_${acctno}`)
+  appStorage.removeItem(`avatar_${acctno}`)
 }
 
 function loadSavedAccounts(): SavedAccount[] {
   try {
-    const raw = localStorage.getItem(ACCOUNTS_KEY)
+    const raw = appStorage.getItem(ACCOUNTS_KEY)
     if (!raw) return []
     const list = JSON.parse(raw) as (SavedAccount & { avatar?: string })[]
     return list.map(({ avatar, ...rest }) => {
       if (avatar) {
-        try { localStorage.setItem(`avatar_${rest.acctno}`, avatar) } catch { /* migrate */ }
+        try { appStorage.setItem(`avatar_${rest.acctno}`, avatar) } catch { /* migrate */ }
       }
       return rest
     })
@@ -54,8 +59,12 @@ function loadSavedAccounts(): SavedAccount[] {
 }
 
 function persistAccounts(accounts: SavedAccount[]) {
-  const clean = accounts.map(({ acctno, password, username, phone, altAcctno }) => ({ acctno, password, username, phone, altAcctno }))
-  localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(clean))
+  const clean = accounts.map(({ acctno, password, username, phone, altAcctno, avatarPath }) => ({ acctno, password, username, phone, altAcctno, avatarPath }))
+  appStorage.setItem(ACCOUNTS_KEY, JSON.stringify(clean))
+}
+
+function getAccountAvatarSrc(acct: SavedAccount): string {
+  return getAccountAvatar(acct.acctno) || (acct.avatarPath ? toFullUrl(acct.avatarPath) : '')
 }
 
 function isSameUser(saved: SavedAccount, loginAcctno: string, serverPhone?: string, serverAcctno?: string): boolean {
@@ -100,12 +109,12 @@ function removeAccount(acctnoToRemove: string) {
 const router = useRouter()
 const userStore = useUserStore()
 
-const cachedAvatar = ref(localStorage.getItem('avatar_data') || '')
+const cachedAvatar = ref(appStorage.getItem('avatar_data') || '')
 
 const acctno = ref('')
 const password = ref('')
 const rememberPwd = ref(false)
-const autoLogin = ref(localStorage.getItem('auto_login') === 'true')
+const autoLogin = ref(appStorage.getItem('auto_login') === 'true')
 const loading = ref(false)
 const errMsg = ref('')
 const deviceId = ref('')
@@ -131,7 +140,7 @@ const shouldShowDropdown = computed(() => {
 })
 
 watch(autoLogin, (val) => {
-  localStorage.setItem('auto_login', String(val))
+  appStorage.setItem('auto_login', String(val))
   if (val) rememberPwd.value = true
 })
 
@@ -179,7 +188,7 @@ function selectAccount(acct: SavedAccount) {
   showDropdown.value = false
   isTyping.value = false
   errMsg.value = ''
-  cachedAvatar.value = getAccountAvatar(acct.acctno)
+  cachedAvatar.value = getAccountAvatarSrc(acct)
   cancelAutoLogin()
 }
 
@@ -254,8 +263,7 @@ onMounted(async () => {
   logger.log('login', '已保存账号列表', savedAccounts.value.map(a => ({
     acctno: a.acctno,
     username: a.username,
-    hasAvatar: !!a.avatar,
-    avatarLen: a.avatar ? a.avatar.length : 0,
+    hasAvatar: !!getAccountAvatar(a.acctno),
   })))
 
   if (savedAccounts.value.length > 0) {
@@ -263,24 +271,24 @@ onMounted(async () => {
     acctno.value = last.acctno
     password.value = last.password
     rememberPwd.value = true
-    const av = getAccountAvatar(last.acctno)
+    const av = getAccountAvatarSrc(last)
     if (av) cachedAvatar.value = av
   }
 
   if (!cachedAvatar.value) {
-    const userInfoRaw = localStorage.getItem('userInfo')
+    const userInfoRaw = appStorage.getItem('userInfo')
     if (userInfoRaw) {
       try {
         const info = JSON.parse(userInfoRaw)
         if (info.avatars) {
-          await userStore.cacheAvatar(info.avatars)
-          cachedAvatar.value = localStorage.getItem('avatar_data') || ''
+          cachedAvatar.value = toFullUrl(info.avatars)
+          userStore.cacheAvatar(info.avatars)
         }
       } catch { /* ignore */ }
     }
   }
 
-  if (cachedAvatar.value && acctno.value && !getAccountAvatar(acctno.value)) {
+  if (cachedAvatar.value?.startsWith('data:') && acctno.value && !getAccountAvatar(acctno.value)) {
     setAccountAvatar(acctno.value, cachedAvatar.value)
   }
 
@@ -337,6 +345,7 @@ async function handleLogin() {
       acctno: acctno.value.trim(),
       password: password.value,
       device_id: deviceId.value,
+      brand_id: getBrand().id,
     }, { signal: loginAbortController.signal })
     if (res.token) {
       userStore.setToken(res.token as string)
@@ -353,6 +362,7 @@ async function handleLogin() {
       vip_expire_at: typeof res.vip_expire_at === 'string' ? res.vip_expire_at : undefined,
       fen: typeof res.fen === 'number' ? res.fen : undefined,
       app_mode: res.app_mode === 'points' ? 'points' : 'card',
+      invite_code: typeof res.invite_code === 'string' ? res.invite_code : undefined,
     })
 
     if (avatarsPath) {
@@ -364,14 +374,20 @@ async function handleLogin() {
 
     if (rememberPwd.value) {
       saveAccount(
-        { acctno: acctno.value.trim(), password: password.value, username, phone: serverPhone, altAcctno: serverAcctno },
+        { acctno: acctno.value.trim(), password: password.value, username, phone: serverPhone, altAcctno: serverAcctno, avatarPath: avatarsPath },
         serverPhone,
         serverAcctno,
       )
-      const avatarBase64 = localStorage.getItem('avatar_data') || ''
+      const avatarBase64 = appStorage.getItem('avatar_data') || ''
       if (avatarBase64) setAccountAvatar(acctno.value.trim(), avatarBase64)
     } else {
       removeAccount(acctno.value.trim())
+    }
+
+    const checkinData = res.checkin as any
+    if (checkinData) {
+      const { setCheckinInfo } = useCheckin()
+      setCheckinInfo(checkinData)
     }
 
     errMsg.value = ''
@@ -469,7 +485,7 @@ onUnmounted(() => {
                   @mousedown.prevent="selectAccount(acct)"
                 >
                   <div class="acct-item-avatar">
-                    <img v-if="getAccountAvatar(acct.acctno)" :src="getAccountAvatar(acct.acctno)" class="acct-avatar-img" alt="" />
+                    <img v-if="getAccountAvatarSrc(acct)" :src="getAccountAvatarSrc(acct)" class="acct-avatar-img" alt="" />
                     <span v-else>{{ (acct.username || acct.acctno).charAt(0) }}</span>
                   </div>
                   <div class="acct-item-info">
@@ -569,7 +585,7 @@ onUnmounted(() => {
   width: 100vw;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
   font-family: "Inter", "SF Pro Display", "PingFang SC", system-ui, sans-serif;
   background: #0A0F1E;
 }

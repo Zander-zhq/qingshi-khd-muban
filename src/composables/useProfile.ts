@@ -1,6 +1,8 @@
 import { ref, computed } from 'vue'
 import { useUserStore } from '../stores/user'
-import { updateProfileApi, uploadAvatarApi, sendEmailCodeApi, bindEmailApi } from '../api/auth'
+import { updateProfileApi, sendEmailCodeApi, bindEmailApi } from '../api/auth'
+import { uploadImage } from '../api/brand'
+import { getBrand } from '../brand'
 import { getAppCredentials } from '../utils/config'
 
 export function useProfile() {
@@ -117,8 +119,11 @@ export function useProfile() {
       let newAvatarUrl = ''
       let changed = false
       if (profileAvatarFile.value) {
-        const uploadRes = await uploadAvatarApi(userStore.token, profileAvatarFile.value)
-        newAvatarUrl = (uploadRes as any).url || ''
+        const uploadRes = await uploadImage(userStore.token, profileAvatarFile.value, 'avatar', {
+          brandId: getBrand().id,
+          phone: userStore.userInfo?.phone || '',
+        })
+        newAvatarUrl = uploadRes.url || ''
         profileAvatarFile.value = null
         changed = true
       }
@@ -136,6 +141,7 @@ export function useProfile() {
       const changedFields: Record<string, string> = {}
       if (profileNickname.value !== (userStore.userInfo?.username || '')) changedFields.nickname = profileNickname.value
       if (profileAcctno.value !== (userStore.userInfo?.acctno || '')) changedFields.acctno = profileAcctno.value
+      if (newAvatarUrl) changedFields.avatars = newAvatarUrl
       if (Object.keys(changedFields).length > 0) {
         const res = await updateProfileApi({ token: userStore.token, ...changedFields })
         userStore.updateUserInfo({
@@ -144,8 +150,6 @@ export function useProfile() {
           avatars: (res as any).avatars || newAvatarUrl || userStore.userInfo?.avatars,
         })
         changed = true
-      } else if (newAvatarUrl) {
-        userStore.updateUserInfo({ avatars: newAvatarUrl })
       }
       profileSuccessMsg.value = changed ? '保存成功' : '没有需要修改的内容'
       if (changed) setTimeout(() => closeProfileModal(), 800)

@@ -2,6 +2,7 @@ import axios from 'axios'
 import type { AxiosInstance, AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { logger } from './logger'
 import { createSignHeaders } from './sign'
+import { appStorage } from './storage'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL as string
 
@@ -23,7 +24,7 @@ const service: AxiosInstance = axios.create({
 
 service.interceptors.request.use(
   async (config: InternalAxiosRequestConfig) => {
-    const token = localStorage.getItem('token')
+    const token = appStorage.getItem('token')
     if (token) {
       config.headers.Authorization = `Bearer ${token}`
     }
@@ -121,7 +122,10 @@ service.interceptors.response.use(
       responseData: error.response?.data,
       message: error.message,
     })
-    const message = error.response?.data?.msg || error.response?.data?.detail || error.message || '请求失败'
+    const detail = error.response?.data?.detail
+    const message = error.response?.data?.msg
+      || (Array.isArray(detail) ? detail.map((d: any) => d.msg || JSON.stringify(d)).join('; ') : (typeof detail === 'string' ? detail : null))
+      || error.message || '请求失败'
     return Promise.reject(new Error(message))
   },
 )

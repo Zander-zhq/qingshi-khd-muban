@@ -1,12 +1,11 @@
 import { post } from '../utils/request'
-import { fetch } from '@tauri-apps/plugin-http'
-import { createSignHeaders } from '../utils/sign'
 
 export interface UserLoginParams {
   app_id: string
   acctno: string
   password: string
   device_id: string
+  brand_id?: string
 }
 
 export interface UserRegisterParams {
@@ -105,36 +104,29 @@ export function redeemCardInnerApi(data: { token: string; card_key: string }) {
   return post<Record<string, unknown>>('/client/user/redeem-card-inner', data)
 }
 
-export async function uploadAvatarApi(token: string, file: File): Promise<Record<string, unknown>> {
-  const BASE_URL = import.meta.env.VITE_API_BASE_URL as string
-  const signHeaders = await createSignHeaders({ token })
+/* ─── 签到 ─── */
 
-  const formData = new FormData()
-  formData.append('token', token)
-  formData.append('file', file)
-
-  const resp = await fetch(`${BASE_URL}/client/user/avatar`, {
-    method: 'POST',
-    headers: {
-      ...signHeaders,
-    },
-    body: formData,
-  })
-
-  const text = await resp.text()
-  if (!resp.ok) {
-    throw new Error(`服务器错误 (${resp.status})，请稍后重试`)
-  }
-
-  let res: { code: number; msg: string; data: Record<string, unknown> }
-  try {
-    res = JSON.parse(text)
-  } catch {
-    throw new Error('服务器返回了无效的响应')
-  }
-
-  if (res.code !== 0) {
-    throw new Error(res.msg || '上传失败')
-  }
-  return res.data ?? {}
+export interface CheckinInfo {
+  checked_today: boolean
+  can_checkin: boolean
+  reward_type: string
+  reward_value: number
+  reward_summary: string
+  brand_id: string
 }
+
+export interface CheckinResult {
+  message: string
+  reward_applied: boolean
+  reward_type: string
+  reward_value: number
+  reward_summary: string
+  vip_expire_at?: string
+  fen?: number
+  checkin: CheckinInfo
+}
+
+export function userCheckinApi(data: { app_id: string; token: string; brand_id?: string }) {
+  return post<CheckinResult>('/client/user/checkin', data)
+}
+

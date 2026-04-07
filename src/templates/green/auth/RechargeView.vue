@@ -128,7 +128,7 @@ async function handleRecharge() {
   display: flex;
   flex-direction: column;
   background: #fff;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .window-content :deep(.app-titlebar.titlebar-compact) {

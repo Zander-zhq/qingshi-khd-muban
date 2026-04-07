@@ -62,7 +62,10 @@ function buildSignString(body: Record<string, unknown>, timestamp: string, nonce
   }
 
   const sortedKeys = Object.keys(filtered).sort()
-  const parts = sortedKeys.map(key => `${key}=${filtered[key]}`)
+  const parts = sortedKeys.map(key => {
+    const v = filtered[key]
+    return `${key}=${Array.isArray(v) || (typeof v === 'object' && v !== null) ? JSON.stringify(v) : v}`
+  })
   parts.push(`timestamp=${timestamp}`)
   parts.push(`nonce=${nonce}`)
   return parts.join('&')

@@ -52,3 +52,14 @@ html, body {
 ::-webkit-scrollbar-thumb:hover {
   background: #94a3b8;
 }
+
+/* PrimeVue primary 按钮跟随模板主题色 */
+.p-button:not(.p-button-secondary):not(.p-button-danger):not(.p-button-success):not(.p-button-info):not(.p-button-warning):not(.p-button-help) {
+  background: var(--app-primary, #22c55e);
+  border-color: var(--app-primary, #22c55e);
+  color: var(--app-primary-text, #fff);
+}
+.p-button:not(.p-button-secondary):not(.p-button-danger):not(.p-button-success):not(.p-button-info):not(.p-button-warning):not(.p-button-help):hover {
+  background: var(--app-primary-hover, #16a34a);
+  border-color: var(--app-primary-hover, #16a34a);
+}

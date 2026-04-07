@@ -23,6 +23,8 @@ dist-ssr
 
 # Rust / Tauri build
 src-tauri/target/
+.brand-build/
+output/
 
 # Editor directories and files
 .vscode/*

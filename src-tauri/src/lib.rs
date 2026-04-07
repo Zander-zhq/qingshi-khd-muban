@@ -8,12 +8,18 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Sha256, digest::Digest};
 use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead, Nonce};
+use base64::Engine;
+use std::fs;
+use std::path::PathBuf;
+use std::io::{BufRead, BufReader};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-const APP_ID: &str = "1001";
-const APP_KEY: &str = "fb6837e15f113ca32d0a838272f3f659";
+const APP_ID: &str = "1002";
+const APP_KEY: &str = "9b3292c63a464200b507fca8d6af5299";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -88,8 +94,11 @@ fn get_device_id() -> String {
 
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
         if let Ok(output) = std::process::Command::new("wmic")
             .args(["csproduct", "get", "UUID"])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -163,7 +172,7 @@ fn compute_sign(body_json: String) -> Result<SignResult, String> {
 
     let sign_string = format!("{}&timestamp={}&nonce={}", param_str, timestamp, nonce);
 
-    let mut mac = HmacSha256::new_from_slice(APP_KEY.as_bytes())
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(APP_KEY.as_bytes())
         .map_err(|e| format!("HMAC 初始化失败: {}", e))?;
     mac.update(sign_string.as_bytes());
     let sign = hex::encode(mac.finalize().into_bytes());
@@ -174,6 +183,560 @@ fn compute_sign(body_json: String) -> Result<SignResult, String> {
         nonce,
         sign,
     })
+}
+
+/* ─── 品牌加密配置文件 ─── */
+
+fn get_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| format!("获取数据目录失败: {}", e))?;
+    fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
+    Ok(dir.join("brand_config.enc"))
+}
+
+fn derive_key() -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(APP_KEY.as_bytes());
+    let result = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&result);
+    key
+}
+
+fn decrypt_config_bytes(encrypted_b64: &str) -> Result<String, String> {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encrypted_b64)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+    if raw.len() < 12 + 16 {
+        return Err("密文数据太短".to_string());
+    }
+    let (nonce_bytes, ciphertext) = raw.split_at(12);
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let key = derive_key();
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| format!("创建解密器失败: {}", e))?;
+    let plaintext = cipher.decrypt(nonce, ciphertext)
+        .map_err(|_| "解密失败：密钥不匹配或数据已损坏".to_string())?;
+    String::from_utf8(plaintext).map_err(|e| format!("UTF-8 解码失败: {}", e))
+}
+
+#[tauri::command]
+fn read_brand_config(app: AppHandle) -> Result<Option<String>, String> {
+    let path = get_config_path(&app)?;
+    if path.exists() {
+        let encrypted_b64 = fs::read_to_string(&path)
+            .map_err(|e| format!("读取配置文件失败: {}", e))?;
+        let json = decrypt_config_bytes(encrypted_b64.trim())?;
+        return Ok(Some(json));
+    }
+
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let res_path = res_dir.join("resources").join("brand_config.enc");
+        if res_path.exists() {
+            let encrypted_b64 = fs::read_to_string(&res_path)
+                .map_err(|e| format!("读取内置配置失败: {}", e))?;
+            let json = decrypt_config_bytes(encrypted_b64.trim())?;
+            let _ = fs::write(&path, encrypted_b64.trim());
+            return Ok(Some(json));
+        }
+    }
+
+    Ok(None)
+}
+
+#[tauri::command]
+fn save_brand_config(app: AppHandle, encrypted_base64: String) -> Result<(), String> {
+    let path = get_config_path(&app)?;
+    fs::write(&path, encrypted_base64.trim())
+        .map_err(|e| format!("写入配置文件失败: {}", e))
+}
+
+#[tauri::command]
+fn decrypt_brand_config(encrypted_base64: String) -> Result<String, String> {
+    decrypt_config_bytes(encrypted_base64.trim())
+}
+
+/* ─── 托盘图标 ─── */
+
+#[tauri::command]
+fn update_tray(app: AppHandle, tooltip: String, icon_data: String) -> Result<(), String> {
+    if let Some(tray) = app.tray_by_id("main") {
+        if !tooltip.is_empty() {
+            let _ = tray.set_tooltip(Some(&tooltip));
+        }
+    }
+
+    if icon_data.is_empty() { return Ok(()); }
+
+    let raw = if icon_data.contains(',') {
+        icon_data.split(',').nth(1).unwrap_or("")
+    } else {
+        &icon_data
+    };
+    let png_bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .map_err(|e| format!("base64 解码失败: {}", e))?;
+
+    let icon_path = app.path().app_data_dir()
+        .map_err(|e| format!("获取数据目录失败: {}", e))?
+        .join("tray_icon.png");
+    fs::write(&icon_path, &png_bytes)
+        .map_err(|e| format!("写入图标失败: {}", e))?;
+
+    let icon = Image::from_path(&icon_path)
+        .map_err(|e| format!("加载图标失败: {}", e))?;
+
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_icon(Some(icon));
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        let icon2 = Image::from_path(&icon_path)
+            .map_err(|e| format!("加载窗口图标失败: {}", e))?;
+        let _ = window.set_icon(icon2);
+    }
+
+    Ok(())
+}
+
+/* ─── 品牌打包构建 ─── */
+
+static BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+fn is_build_running() -> bool {
+    BUILD_RUNNING.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+fn start_brand_build(app: AppHandle, brand_name: String, product_name: String, logo_data: String) -> Result<(), String> {
+    if BUILD_RUNNING.load(Ordering::SeqCst) {
+        return Err("已有构建任务正在运行".to_string());
+    }
+
+    let tauri_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let project_root = tauri_dir.parent()
+        .ok_or("无法确定项目根目录")?
+        .to_path_buf();
+
+    let config_path = get_config_path(&app)?;
+    if !config_path.exists() {
+        return Err("品牌配置文件不存在，请先保存品牌设置".to_string());
+    }
+
+    let build_dir = project_root.join(".brand-build");
+    fs::create_dir_all(&build_dir)
+        .map_err(|e| format!("创建构建目录失败: {}", e))?;
+    fs::copy(&config_path, build_dir.join("brand_config.enc"))
+        .map_err(|e| format!("复制品牌配置失败: {}", e))?;
+
+    BUILD_RUNNING.store(true, Ordering::SeqCst);
+    let _ = app.emit("build-status", "building");
+
+    std::thread::spawn(move || {
+        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, true);
+
+        let payload = match result {
+            Ok(path) => serde_json::json!({ "success": true, "output_path": path }),
+            Err(e) => serde_json::json!({ "success": false, "error": e }),
+        };
+        let _ = app.emit("build-complete", payload);
+        BUILD_RUNNING.store(false, Ordering::SeqCst);
+    });
+
+    Ok(())
+}
+
+fn decode_data_uri(data_uri: &str) -> Result<Vec<u8>, String> {
+    let raw = if data_uri.contains(',') {
+        data_uri.split(',').nth(1).unwrap_or("")
+    } else {
+        data_uri
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(raw)
+        .map_err(|e| format!("base64 解码失败: {}", e))
+}
+
+fn create_ico_from_png(png_data: &[u8], ico_path: &PathBuf) -> Result<(), String> {
+    let img = image::load_from_memory(png_data)
+        .map_err(|e| format!("PNG 解码失败: {}", e))?;
+
+    let sizes: &[u32] = &[48, 32, 16];
+    let mut bmp_entries: Vec<Vec<u8>> = Vec::new();
+
+    for &size in sizes {
+        let resized = img.resize_exact(size, size, image::imageops::FilterType::Lanczos3);
+        let rgba = resized.to_rgba8();
+
+        let mut bmp = Vec::new();
+        // BITMAPINFOHEADER (40 bytes)
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&(size as i32).to_le_bytes());
+        bmp.extend_from_slice(&((size * 2) as i32).to_le_bytes()); // height doubled for ICO
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&32u16.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
+        let mask_row_bytes = ((size + 31) / 32) * 4;
+        let image_size = size * size * 4 + mask_row_bytes * size;
+        bmp.extend_from_slice(&image_size.to_le_bytes());
+        bmp.extend_from_slice(&[0u8; 16]); // remaining header fields
+
+        // pixel data: BGRA, bottom-to-top
+        for y in (0..size).rev() {
+            for x in 0..size {
+                let p = rgba.get_pixel(x, y);
+                bmp.extend_from_slice(&[p[2], p[1], p[0], p[3]]);
+            }
+        }
+
+        // AND mask
+        for y in (0..size).rev() {
+            let mut row = vec![0u8; mask_row_bytes as usize];
+            for x in 0..size {
+                if rgba.get_pixel(x, y)[3] == 0 {
+                    row[(x / 8) as usize] |= 1 << (7 - (x % 8));
+                }
+            }
+            bmp.extend_from_slice(&row);
+        }
+
+        bmp_entries.push(bmp);
+    }
+
+    let mut ico = Vec::new();
+    // ICO header
+    ico.extend_from_slice(&0u16.to_le_bytes());
+    ico.extend_from_slice(&1u16.to_le_bytes());
+    ico.extend_from_slice(&(sizes.len() as u16).to_le_bytes());
+
+    // directory entries
+    let header_len = 6 + 16 * sizes.len();
+    let mut offset = header_len;
+    for (i, &size) in sizes.iter().enumerate() {
+        ico.push(size as u8);
+        ico.push(size as u8);
+        ico.push(0); ico.push(0);
+        ico.extend_from_slice(&1u16.to_le_bytes());
+        ico.extend_from_slice(&32u16.to_le_bytes());
+        ico.extend_from_slice(&(bmp_entries[i].len() as u32).to_le_bytes());
+        ico.extend_from_slice(&(offset as u32).to_le_bytes());
+        offset += bmp_entries[i].len();
+    }
+
+    for entry in &bmp_entries {
+        ico.extend_from_slice(entry);
+    }
+
+    fs::write(ico_path, ico).map_err(|e| format!("写入 ICO 失败: {}", e))
+}
+
+fn execute_build(app: &AppHandle, tauri_dir: &PathBuf, project_root: &PathBuf, brand_name: &str, product_name: &str, logo_data: &str, include_brand_config: bool) -> Result<String, String> {
+    let build_dir = project_root.join(".brand-build");
+    fs::create_dir_all(&build_dir).map_err(|e| format!("创建构建目录失败: {}", e))?;
+    let display_name = if product_name.is_empty() { brand_name } else { product_name };
+
+    let nsis_hooks_str = format!(
+        r#"!define MUI_CUSTOMFUNCTION_GUIINIT __CustomGuiInit
+
+Function __CustomGuiInit
+  IfFileExists "D:\*.*" 0 __skip_d_drive
+    StrCpy $INSTDIR "D:\{name}"
+  __skip_d_drive:
+FunctionEnd
+"#,
+        name = display_name
+    );
+    let mut nsis_hooks_bytes: Vec<u8> = vec![0xEF, 0xBB, 0xBF];
+    nsis_hooks_bytes.extend_from_slice(nsis_hooks_str.as_bytes());
+    fs::write(build_dir.join("nsis-hooks.nsi"), nsis_hooks_bytes)
+        .map_err(|e| format!("写入 NSIS hooks 失败: {}", e))?;
+
+    let mut config_override = serde_json::json!({
+        "productName": display_name,
+        "mainBinaryName": display_name,
+        "bundle": {
+            "targets": ["nsis"],
+            "windows": {
+                "nsis": {
+                    "languages": ["SimpChinese"],
+                    "displayLanguageSelector": false,
+                    "installerHooks": "../.brand-build/nsis-hooks.nsi"
+                }
+            }
+        }
+    });
+    if include_brand_config {
+        config_override["bundle"]["resources"] = serde_json::json!({
+            "../.brand-build/brand_config.enc": "resources/brand_config.enc"
+        });
+    }
+
+    if !logo_data.is_empty() {
+        if let Ok(png_bytes) = decode_data_uri(logo_data) {
+            let png_path = build_dir.join("brand-icon.png");
+            let ico_path = build_dir.join("brand-icon.ico");
+            if fs::write(&png_path, &png_bytes).is_ok() && create_ico_from_png(&png_bytes, &ico_path).is_ok() {
+                config_override["bundle"]["icon"] = serde_json::json!([
+                    "../.brand-build/brand-icon.png",
+                    "../.brand-build/brand-icon.ico"
+                ]);
+                config_override["bundle"]["windows"]["nsis"]["installerIcon"] = serde_json::json!("../.brand-build/brand-icon.ico");
+                let _ = app.emit("build-log", "已生成品牌图标文件");
+            }
+        }
+    }
+
+    if config_override["bundle"]["windows"]["nsis"].get("installerIcon").is_none() {
+        config_override["bundle"]["windows"]["nsis"]["installerIcon"] = serde_json::json!("icons/icon.ico");
+    }
+
+    let config_str = serde_json::to_string(&config_override)
+        .map_err(|e| format!("序列化配置失败: {}", e))?;
+
+    let config_file = build_dir.join("tauri-build-config.json");
+    fs::write(&config_file, &config_str)
+        .map_err(|e| format!("写入构建配置失败: {}", e))?;
+
+    let config_file_str = config_file.to_string_lossy().to_string();
+    let _ = app.emit("build-log", format!("构建配置: productName={}, 语言=简体中文", display_name));
+
+    let nsis_dir = tauri_dir.join("target").join("release").join("bundle").join("nsis");
+    if nsis_dir.exists() {
+        let _ = fs::remove_dir_all(&nsis_dir);
+        let _ = app.emit("build-log", "已清理旧 NSIS 构建缓存");
+    }
+
+    let output_dir = project_root.join("output");
+    if output_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&output_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().map_or(false, |e| e == "exe") {
+                    let _ = fs::remove_file(&p);
+                }
+            }
+        }
+    }
+
+    let build_result = run_build_process(app, project_root, tauri_dir, &config_file_str);
+
+    let final_result = match build_result {
+        Ok(exe_path) => {
+            let _ = fs::create_dir_all(&output_dir);
+            let src = PathBuf::from(&exe_path);
+            if src.exists() {
+                if let Some(filename) = src.file_name() {
+                    let dest = output_dir.join(filename);
+                    fs::copy(&src, &dest)
+                        .map_err(|e| format!("复制安装包到 output 目录失败: {}", e))?;
+                    let _ = app.emit("build-log", format!("已复制到: {}", dest.to_string_lossy()));
+                    Ok(dest.to_string_lossy().to_string())
+                } else { Ok(exe_path) }
+            } else { Ok(exe_path) }
+        }
+        Err(e) => Err(e),
+    };
+
+    let _ = fs::remove_dir_all(&build_dir);
+
+    if nsis_dir.exists() {
+        let _ = fs::remove_dir_all(&nsis_dir);
+    }
+
+    final_result
+}
+
+fn run_build_process(app: &AppHandle, project_root: &PathBuf, tauri_dir: &PathBuf, config_file: &str) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    let mut child = std::process::Command::new("cmd")
+        .args(["/c", "npx", "tauri", "build", "--config", config_file])
+        .current_dir(project_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动构建失败: {}", e))?;
+
+    #[cfg(not(target_os = "windows"))]
+    let mut child = std::process::Command::new("npx")
+        .args(["tauri", "build", "--config", config_file])
+        .current_dir(project_root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("启动构建失败: {}", e))?;
+
+    let app_out = app.clone();
+    let stdout = child.stdout.take();
+    let t1 = std::thread::spawn(move || {
+        if let Some(out) = stdout {
+            for line in BufReader::new(out).lines().flatten() {
+                let _ = app_out.emit("build-log", &line);
+            }
+        }
+    });
+
+    let app_err = app.clone();
+    let stderr = child.stderr.take();
+    let t2 = std::thread::spawn(move || {
+        if let Some(err) = stderr {
+            for line in BufReader::new(err).lines().flatten() {
+                let _ = app_err.emit("build-log", &line);
+            }
+        }
+    });
+
+    let _ = t1.join();
+    let _ = t2.join();
+
+    let status = child.wait()
+        .map_err(|e| format!("等待构建进程失败: {}", e))?;
+
+    if !status.success() {
+        return Err(format!("构建失败，退出码: {}", status.code().unwrap_or(-1)));
+    }
+
+    let bundle_dir = tauri_dir.join("target").join("release").join("bundle");
+    let nsis_dir = bundle_dir.join("nsis");
+
+    if nsis_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&nsis_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |ext| ext == "exe") {
+                    return Ok(path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    Ok(bundle_dir.to_string_lossy().to_string())
+}
+
+/* ─── 版本打包（不含品牌配置） ─── */
+
+#[tauri::command]
+async fn start_version_build(
+    app: AppHandle,
+    brand_name: String,
+    product_name: String,
+    logo_data: String,
+) -> Result<(), String> {
+    if BUILD_RUNNING.load(Ordering::SeqCst) {
+        return Err("已有构建任务在运行".into());
+    }
+
+    let tauri_dir = app.path().resolve("", tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("获取 tauri 目录失败: {}", e))?
+        .parent().unwrap().parent().unwrap().parent().unwrap()
+        .join("src-tauri");
+    let project_root = tauri_dir.parent().unwrap().to_path_buf();
+
+    BUILD_RUNNING.store(true, Ordering::SeqCst);
+    let _ = app.emit("build-status", "building");
+
+    std::thread::spawn(move || {
+        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, false);
+
+        let payload = match result {
+            Ok(path) => serde_json::json!({ "success": true, "output_path": path }),
+            Err(e) => serde_json::json!({ "success": false, "error": e }),
+        };
+        let _ = app.emit("build-complete", payload);
+        BUILD_RUNNING.store(false, Ordering::SeqCst);
+    });
+
+    Ok(())
+}
+
+/* ─── 版本更新：下载 + 安装 ─── */
+
+#[derive(Clone, serde::Serialize)]
+struct DownloadFileProgress {
+    loaded: u64,
+    total: Option<u64>,
+    percent: f64,
+    file_path: String,
+}
+
+#[tauri::command]
+async fn download_file_to_dir(
+    app: AppHandle,
+    url: String,
+    save_dir: String,
+) -> Result<String, String> {
+    use futures_util::StreamExt;
+
+    if url.is_empty() { return Err("下载地址为空".into()); }
+    let dir = std::path::Path::new(&save_dir);
+    if !dir.exists() {
+        fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+
+    let url_path = url.split('?').next().unwrap_or(&url);
+    let file_name = url_path.rsplit('/').next().unwrap_or("installer.exe");
+    let file_path = dir.join(file_name);
+    let file_path_str = file_path.to_string_lossy().to_string();
+
+    let client = reqwest::Client::new();
+    let response = client.get(&url).send().await
+        .map_err(|e| format!("下载失败: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!("下载失败: HTTP {}", response.status()));
+    }
+
+    let total = response.content_length();
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut file = fs::File::create(&file_path)
+        .map_err(|e| format!("创建文件失败: {}", e))?;
+
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| format!("读取数据失败: {}", e))?;
+        downloaded += bytes.len() as u64;
+        std::io::Write::write_all(&mut file, &bytes)
+            .map_err(|e| format!("写入文件失败: {}", e))?;
+
+        let percent = total
+            .map(|t| if t > 0 { (downloaded as f64 / t as f64) * 100.0 } else { 0.0 })
+            .unwrap_or(0.0);
+        let _ = app.emit("download_file_progress", DownloadFileProgress {
+            loaded: downloaded, total, percent,
+            file_path: file_path_str.clone(),
+        });
+    }
+
+    let _ = app.emit("download_file_progress", DownloadFileProgress {
+        loaded: downloaded, total, percent: 100.0,
+        file_path: file_path_str.clone(),
+    });
+
+    Ok(file_path_str)
+}
+
+#[tauri::command]
+fn get_download_dir(app: AppHandle) -> Result<String, String> {
+    let dir = app.path().app_data_dir()
+        .map_err(|e| format!("获取数据目录失败: {}", e))?
+        .join("downloads");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn run_installer_and_exit(app: AppHandle, installer_path: String) -> Result<(), String> {
+    let path = std::path::Path::new(&installer_path);
+    if !path.exists() {
+        return Err(format!("安装包不存在: {}", installer_path));
+    }
+
+    std::process::Command::new(&installer_path)
+        .args(["/S", "/R"])
+        .spawn()
+        .map_err(|e| format!("启动安装包失败: {}", e))?;
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    app.exit(0);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -189,7 +752,17 @@ pub fn run() {
             prepare_window,
             reveal_window,
             exit_app,
-            sync_tray_checks
+            sync_tray_checks,
+            read_brand_config,
+            save_brand_config,
+            decrypt_brand_config,
+            update_tray,
+            is_build_running,
+            start_brand_build,
+            start_version_build,
+            download_file_to_dir,
+            get_download_dir,
+            run_installer_and_exit
         ])
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -238,14 +811,20 @@ pub fn run() {
                 .item(&exit_item)
                 .build()?;
 
-            let icon = Image::from_path("icons/icon.png")
-                .unwrap_or_else(|_| Image::from_bytes(include_bytes!("../icons/icon.png")).expect("内置图标加载失败"));
+            let cached_icon_path = app.path().app_data_dir().ok()
+                .map(|d| d.join("tray_icon.png"));
+            let icon = cached_icon_path.as_ref()
+                .and_then(|p| if p.exists() { Image::from_path(p).ok() } else { None })
+                .unwrap_or_else(|| {
+                    Image::from_path("icons/icon.png")
+                        .unwrap_or_else(|_| Image::from_bytes(include_bytes!("../icons/icon.png")).expect("内置图标加载失败"))
+                });
 
-            let _tray = TrayIconBuilder::new()
+            let _tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
                 .tooltip("青拾")
                 .menu(&tray_menu)
-                .on_menu_event(|app: &AppHandle, event| {
+                .on_menu_event(|app: &AppHandle, event: tauri::menu::MenuEvent| {
                     match event.id().as_ref() {
                         "show" => {
                             if let Some(w) = app.get_webview_window("main") {

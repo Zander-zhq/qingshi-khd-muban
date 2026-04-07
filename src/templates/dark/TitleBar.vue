@@ -5,14 +5,20 @@ import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { invoke } from '@tauri-apps/api/core'
 import { showDialog } from '@/utils/dialog'
 import { exitApp } from '@/utils/window'
-import { getBrand, VERSION } from '../../brand'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import { appStorage } from '../../utils/storage'
+import { getBrand, getBrandLogo, VERSION } from '../../brand'
 
 defineProps<{
   variant?: 'full' | 'minimal' | 'auth'
   title?: string
+  contactFloatVisible?: boolean
 }>()
 
+const emit = defineEmits<{ 'restore-contact': [] }>()
+
 const brand = getBrand()
+const brandLogo = getBrandLogo()
 const APP_BRAND = brand.brand_name
 const APP_PRODUCT = brand.product_name
 const APP_VERSION = VERSION
@@ -20,7 +26,7 @@ const APP_VERSION = VERSION
 const appWindow = getCurrentWindow()
 const isMaximized = ref(false)
 const showMenu = ref(false)
-const closeMode = ref<'exit' | 'minimize'>((localStorage.getItem('close_mode') as 'exit' | 'minimize') || 'exit')
+const closeMode = ref<'exit' | 'minimize'>((appStorage.getItem('close_mode') as 'exit' | 'minimize') || 'exit')
 const autoStartEnabled = ref(false)
 
 onMounted(async () => {
@@ -78,15 +84,15 @@ function onRefresh() {
 
 function onClearCache() {
   showMenu.value = false
-  const keepKeys = ['saved_accounts', 'token', 'userInfo', 'close_mode']
+  const keepKeys = ['saved_accounts', 'token', 'userInfo', 'close_mode', 'brand_config', 'active_brand_id']
   const saved: Record<string, string> = {}
   keepKeys.forEach(k => {
-    const v = localStorage.getItem(k)
+    const v = appStorage.getItem(k)
     if (v) saved[k] = v
   })
   sessionStorage.clear()
-  localStorage.clear()
-  Object.entries(saved).forEach(([k, v]) => localStorage.setItem(k, v))
+  appStorage.clear()
+  Object.entries(saved).forEach(([k, v]) => appStorage.setItem(k, v))
   window.location.reload()
 }
 
@@ -115,8 +121,13 @@ async function setAutoStart(enabled: boolean) {
 function setCloseMode(mode: 'exit' | 'minimize') {
   showMenu.value = false
   closeMode.value = mode
-  localStorage.setItem('close_mode', mode)
+  appStorage.setItem('close_mode', mode)
   syncTrayChecks()
+}
+
+function onWebsite() {
+  showMenu.value = false
+  if (brand.website) openUrl(brand.website)
 }
 
 async function onAbout() {
@@ -136,7 +147,7 @@ async function onExit() {
 <template>
   <header class="app-titlebar" :class="{ 'titlebar-compact': variant === 'auth' }" style="-webkit-app-region: drag">
     <div class="tb-left">
-      <img class="tb-brand-icon" :src="'/' + brand.logo" :alt="APP_BRAND" />
+      <img class="tb-brand-icon" :src="brandLogo" :alt="APP_BRAND" />
       <span class="tb-name">{{ APP_BRAND }}</span>
       <span class="tb-dot">·</span>
       <span class="tb-product">{{ APP_PRODUCT }}</span>
@@ -197,7 +208,15 @@ async function onExit() {
             </div>
           </div>
           <div class="app-menu-divider" />
-          <button class="app-menu-item" @click="onAbout">
+          <button v-if="brand.website" class="app-menu-item" @click="onWebsite">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            访问官网
+          </button>
+          <button v-if="brand.contact_images?.length && !contactFloatVisible" class="app-menu-item" @click="showMenu = false; emit('restore-contact')">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            联系我们
+          </button>
+          <button v-if="brand.about" class="app-menu-item" @click="onAbout">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             关于
           </button>

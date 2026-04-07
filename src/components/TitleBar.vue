@@ -5,6 +5,7 @@ import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart'
 import { invoke } from '@tauri-apps/api/core'
 import { showDialog } from '@/utils/dialog'
 import { exitApp } from '@/utils/window'
+import { appStorage } from '../utils/storage'
 
 defineProps<{
   variant?: 'full' | 'minimal' | 'auth'
@@ -18,7 +19,7 @@ const APP_VERSION = 'V1.1.1'
 const appWindow = getCurrentWindow()
 const isMaximized = ref(false)
 const showMenu = ref(false)
-const closeMode = ref<'exit' | 'minimize'>((localStorage.getItem('close_mode') as 'exit' | 'minimize') || 'exit')
+const closeMode = ref<'exit' | 'minimize'>((appStorage.getItem('close_mode') as 'exit' | 'minimize') || 'exit')
 const autoStartEnabled = ref(false)
 
 onMounted(async () => {
@@ -79,12 +80,12 @@ function onClearCache() {
   const keepKeys = ['saved_accounts', 'token', 'userInfo', 'close_mode']
   const saved: Record<string, string> = {}
   keepKeys.forEach(k => {
-    const v = localStorage.getItem(k)
+    const v = appStorage.getItem(k)
     if (v) saved[k] = v
   })
   sessionStorage.clear()
-  localStorage.clear()
-  Object.entries(saved).forEach(([k, v]) => localStorage.setItem(k, v))
+  appStorage.clear()
+  Object.entries(saved).forEach(([k, v]) => appStorage.setItem(k, v))
   window.location.reload()
 }
 
@@ -113,7 +114,7 @@ async function setAutoStart(enabled: boolean) {
 function setCloseMode(mode: 'exit' | 'minimize') {
   showMenu.value = false
   closeMode.value = mode
-  localStorage.setItem('close_mode', mode)
+  appStorage.setItem('close_mode', mode)
   syncTrayChecks()
 }
 

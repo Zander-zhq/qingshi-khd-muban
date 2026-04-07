@@ -3,14 +3,26 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { nextTick } from 'vue'
 import type { Router } from 'vue-router'
 import { logger } from './logger'
+import { getTemplate } from '../brand'
 
-const LAYOUT = {
-  login: { width: 420, height: 640, minWidth: 420, minHeight: 640, resizable: false },
-  main: { width: 1440, height: 900, minWidth: 1200, minHeight: 760, resizable: true },
-} as const
+const LOGIN_LAYOUTS: Record<string, { width: number; height: number }> = {
+  green:  { width: 420, height: 640 },
+  orange: { width: 760, height: 560 },
+  dark:   { width: 480, height: 680 },
+}
+const MAIN_LAYOUT = { width: 1440, height: 900, minWidth: 1200, minHeight: 760 }
 
-async function prepareWindow(layout: keyof typeof LAYOUT) {
-  const l = LAYOUT[layout]
+function getLoginLayout() {
+  const base = LOGIN_LAYOUTS[getTemplate()] || LOGIN_LAYOUTS.green
+  return { ...base, minWidth: base.width, minHeight: base.height, resizable: false }
+}
+
+function getMainLayout() {
+  return { ...MAIN_LAYOUT, resizable: true }
+}
+
+async function prepareWindow(layout: 'login' | 'main') {
+  const l = layout === 'login' ? getLoginLayout() : getMainLayout()
   await invoke('prepare_window', {
     width: l.width,
     height: l.height,
@@ -59,13 +71,13 @@ export async function switchToLoginLayout(router: Router, targetPath: string = '
 export async function ensureLoginSize() {
   try {
     const win = getCurrentWindow()
-    const l = LAYOUT.login
+    const l = getLoginLayout()
     const size = await win.innerSize()
     if (size.width > l.width + 50 || size.height > l.height + 50) {
       logger.log('window', '检测到窗口过大，调整为登录尺寸', { current: `${size.width}x${size.height}` })
       await win.setResizable(true)
-      await win.setMinSize({ type: 'Logical', width: l.minWidth, height: l.minHeight })
-      await win.setSize({ type: 'Logical', width: l.width, height: l.height })
+      await win.setMinSize({ type: 'Logical', width: l.minWidth, height: l.minHeight } as any)
+      await win.setSize({ type: 'Logical', width: l.width, height: l.height } as any)
       await win.setResizable(l.resizable)
       await win.center()
     }

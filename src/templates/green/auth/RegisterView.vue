@@ -162,7 +162,7 @@ async function handleRegister() {
   display: flex;
   flex-direction: column;
   background: #fff;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .window-content :deep(.app-titlebar.titlebar-compact) {

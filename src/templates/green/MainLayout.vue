@@ -5,25 +5,68 @@ import InputText from 'primevue/inputtext'
 import Button from 'primevue/button'
 import TitleBar from './TitleBar.vue'
 import { useUserStore } from '../../stores/user'
+import { useCheckin } from '../../composables/useCheckin'
 import { logger } from '../../utils/logger'
 import { switchToLoginLayout } from '../../utils/window'
 import { startHeartbeat, stopHeartbeat, callLogoutApi, setHeartbeatCallbacks } from '../../utils/heartbeat'
 import { showDialog } from '../../utils/dialog'
-import { post } from '../../utils/request'
-import { updateProfileApi, uploadAvatarApi, sendEmailCodeApi, bindEmailApi, changePasswordApi, redeemCardInnerApi, unbindDeviceInnerApi } from '../../api/auth'
+import { updateProfileApi, sendEmailCodeApi, bindEmailApi, changePasswordApi, redeemCardInnerApi, unbindDeviceInnerApi } from '../../api/auth'
+import { uploadImage } from '../../api/brand'
+import { getBrand } from '../../brand'
+import { fetchPackages, createOrder, queryOrder } from '../../api/pay'
+import type { PayPackage } from '../../api/pay'
+import QRCode from 'qrcode'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import { useContact } from '../../composables/useContact'
+import { useVersionUpdate } from '../../composables/useVersionUpdate'
 import { getAppCredentials, getUnbindTip } from '../../utils/config'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const brand = getBrand()
+
+const {
+  hasContactImages, showContactFloat, showContactModal, contactHighlight, cachedImages,
+  closeContactFloat, restoreContactFloat,
+} = useContact()
+
+const {
+  showUpdateDialog, updateInfo, downloadProgress, downloadStatus, downloadError,
+  selectedUpdateIdx, checkForUpdate, applyUpdate, dismissUpdate,
+} = useVersionUpdate()
+
+const {
+  checkinLoading, canCheckin, rewardSummary, showCheckinHint, doCheckin, clearCheckin,
+} = useCheckin()
+
+const checkinMsg = ref('')
+
+async function handleCheckin() {
+  try {
+    const res = await doCheckin()
+    if (res) {
+      checkinMsg.value = res.reward_summary ? `签到成功！获得 ${res.reward_summary}` : '签到成功！'
+      setTimeout(() => checkinMsg.value = '', 3000)
+    }
+  } catch (err: unknown) {
+    checkinMsg.value = err instanceof Error ? err.message : '签到失败'
+    setTimeout(() => checkinMsg.value = '', 3000)
+  }
+}
 
 const displayName = computed(() => userStore.userInfo?.username || '用户')
 const menuItems = [
   { label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },
+  ...(import.meta.env.DEV ? [
+    { label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' },
+    { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },
+  ] : []),
 ]
 
 const pageTitle = computed(() => {
-  if (route.path === '/main/dashboard') return '仪表盘'
+  const found = menuItems.find(m => route.path === m.path)
+  if (found) return found.label
   return '主页'
 })
 
@@ -54,6 +97,7 @@ onMounted(() => {
   if (userStore.token) {
     startHeartbeat(userStore.token)
   }
+  checkForUpdate()
   document.addEventListener('click', closeUserMenu)
 
   function countdownLogout(seconds: number) {
@@ -122,6 +166,7 @@ async function handleLogout() {
   if (userStore.token) {
     await callLogoutApi(userStore.token)
   }
+  clearCheckin()
   userStore.logout()
   await switchToLoginLayout(router)
 }
@@ -244,8 +289,11 @@ async function submitProfile() {
     let changed = false
 
     if (profileAvatarFile.value) {
-      const uploadRes = await uploadAvatarApi(userStore.token, profileAvatarFile.value)
-      newAvatarUrl = (uploadRes as any).url || ''
+      const uploadRes = await uploadImage(userStore.token, profileAvatarFile.value, 'avatar', {
+        brandId: getBrand().id,
+        phone: userStore.userInfo?.phone || '',
+      })
+      newAvatarUrl = uploadRes.url || ''
       profileAvatarFile.value = null
       changed = true
     }
@@ -265,6 +313,7 @@ async function submitProfile() {
     const changedFields: Record<string, string> = {}
     if (profileNickname.value !== (userStore.userInfo?.username || '')) changedFields.nickname = profileNickname.value
     if (profileAcctno.value !== (userStore.userInfo?.acctno || '')) changedFields.acctno = profileAcctno.value
+    if (newAvatarUrl) changedFields.avatars = newAvatarUrl
 
     if (Object.keys(changedFields).length > 0) {
       const res = await updateProfileApi({ token: userStore.token, ...changedFields })
@@ -274,8 +323,6 @@ async function submitProfile() {
         avatars: (res as any).avatars || newAvatarUrl || userStore.userInfo?.avatars,
       })
       changed = true
-    } else if (newAvatarUrl) {
-      userStore.updateUserInfo({ avatars: newAvatarUrl })
     }
 
     profileSuccessMsg.value = changed ? '保存成功' : '没有需要修改的内容'
@@ -288,17 +335,34 @@ async function submitProfile() {
 }
 
 const showRechargeModal = ref(false)
+const rechargeTab = ref<'online' | 'card'>('card')
 const rechargeCardKey = ref('')
 const rechargeLoading = ref(false)
 const rechargeErrMsg = ref('')
 const rechargeSuccessMsg = ref('')
+
+const hasOnlinePay = computed(() => brand.pay_channel !== 'none' && (brand.pay_methods || []).length > 0)
+const hasWechat = computed(() => (brand.pay_methods || []).includes('wechat'))
+const hasAlipay = computed(() => (brand.pay_methods || []).includes('alipay'))
+
+const packages = ref<PayPackage[]>([])
+const packagesLoading = ref(false)
+const selectedPkg = ref<PayPackage | null>(null)
+const selectedPayMethod = ref<'wechat' | 'alipay'>('wechat')
+const payQrUrl = ref('')
+const payOrderNo = ref('')
+const showQrModal = ref(false)
+const payStatus = ref<'pending' | 'paid' | 'failed'>('pending')
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
 function handleRecharge() {
   showUserMenu.value = false
   rechargeCardKey.value = ''
   rechargeErrMsg.value = ''
   rechargeSuccessMsg.value = ''
+  rechargeTab.value = hasOnlinePay.value ? 'online' : 'card'
   showRechargeModal.value = true
+  if (hasOnlinePay.value && packages.value.length === 0) loadPackages()
 }
 
 function closeRechargeModal() {
@@ -334,11 +398,110 @@ async function submitRecharge() {
       showExpired.value = false
       if (userStore.token) startHeartbeat(userStore.token)
     }
+    setTimeout(() => closeRechargeModal(), 3000)
   } catch (err: unknown) {
     rechargeErrMsg.value = err instanceof Error ? err.message : '充值失败'
   } finally {
     rechargeLoading.value = false
   }
+}
+
+async function loadPackages() {
+  packagesLoading.value = true
+  try {
+    const { appId } = await getAppCredentials()
+    logger.log('pay', '请求套餐列表', { appId })
+    const res = await fetchPackages(userStore.token, appId)
+    logger.log('pay', '套餐列表响应', res)
+    packages.value = res.items || []
+    logger.log('pay', '解析后套餐数量', packages.value.length)
+  } catch (err) {
+    logger.error('pay', '套餐列表请求失败', err)
+    packages.value = []
+  } finally { packagesLoading.value = false }
+}
+
+function formatPrice(price: number) {
+  return (price / 100).toFixed(2)
+}
+
+function formatDuration(seconds?: number) {
+  if (!seconds) return ''
+  const days = Math.floor(seconds / 86400)
+  if (days >= 365 && days % 365 === 0) return `${days / 365}年`
+  if (days >= 30 && days % 30 === 0) return `${days / 30}个月`
+  return `${days}天`
+}
+
+function selectPackage(pkg: PayPackage) {
+  selectedPkg.value = pkg
+  if (hasWechat.value) selectedPayMethod.value = 'wechat'
+  else if (hasAlipay.value) selectedPayMethod.value = 'alipay'
+}
+
+async function startPay() {
+  if (!selectedPkg.value) return
+  rechargeErrMsg.value = ''
+  rechargeLoading.value = true
+  try {
+    const { appId } = await getAppCredentials()
+    const payMethod = brand.pay_channel === 'hupijiao'
+      ? `hupijiao_${selectedPayMethod.value}`
+      : selectedPayMethod.value
+    const res = await createOrder(userStore.token, appId, {
+      card_group_id: selectedPkg.value.id,
+      payment_method: payMethod,
+    })
+    logger.log('pay', '创建订单响应', res)
+    payOrderNo.value = res.order_no
+
+    const rawUrl = res.pay_url || res.code_url || res.qr_code || ''
+    if (!rawUrl) { rechargeErrMsg.value = '服务端未返回支付链接'; return }
+    payQrUrl.value = await QRCode.toDataURL(rawUrl, { width: 280, margin: 2 })
+    payStatus.value = 'pending'
+    showQrModal.value = true
+    startPayPolling()
+  } catch (err: unknown) {
+    rechargeErrMsg.value = err instanceof Error ? err.message : '创建订单失败'
+  } finally {
+    rechargeLoading.value = false
+  }
+}
+
+function startPayPolling() {
+  stopPayPolling()
+  pollTimer = setInterval(async () => {
+    try {
+      const res = await queryOrder(userStore.token, payOrderNo.value)
+      logger.log('pay', '订单状态', { status: res.status, order_no: res.order_no, raw: res })
+      if (res.status === 'paid') {
+        payStatus.value = 'paid'
+        stopPayPolling()
+        const update: Record<string, unknown> = {}
+        if ((res as any).vip_expire_at) update.vip_expire_at = (res as any).vip_expire_at
+        if ((res as any).fen != null) update.fen = (res as any).fen
+        if (Object.keys(update).length) userStore.updateUserInfo(update as any)
+        if (forceExpired.value) {
+          forceExpired.value = false
+          showExpired.value = false
+        }
+        if (userStore.token) startHeartbeat(userStore.token)
+        setTimeout(() => { closeQrModal(); closeRechargeModal() }, 3000)
+      } else if (res.status === 'failed') {
+        payStatus.value = 'failed'
+        stopPayPolling()
+      }
+    } catch { /* polling error, continue */ }
+  }, 3000)
+}
+
+function stopPayPolling() {
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+}
+
+function closeQrModal() {
+  showQrModal.value = false
+  stopPayPolling()
 }
 
 const showChangePwdModal = ref(false)
@@ -418,7 +581,7 @@ async function submitUnbind() {
 
 <template>
   <div class="layout-root">
-    <TitleBar variant="full" :title="pageTitle" />
+    <TitleBar variant="full" :title="pageTitle" :contact-float-visible="showContactFloat" @restore-contact="restoreContactFloat" />
 
     <div class="layout-body">
       <aside class="sidebar" :class="{ 'sidebar--collapsed': collapsed }">
@@ -461,6 +624,25 @@ async function submitUnbind() {
             <div class="page-subtitle">欢迎回来，开始今天的任务吧</div>
           </div>
           <div class="header-right">
+            <button v-if="brand.tutorial_url" class="ch-tutorial-btn" @click="openUrl(brand.tutorial_url)">
+              <i class="pi pi-book"></i> 使用教程
+            </button>
+            <div v-if="brand.checkin_reward_value > 0" class="ch-checkin-wrap">
+              <button class="ch-checkin-btn" :class="{ 'ch-checkin-done': !canCheckin }" :disabled="checkinLoading || !canCheckin" @click="handleCheckin">
+                <i class="pi" :class="canCheckin ? 'pi-sun' : 'pi-check-circle'"></i>
+                {{ checkinLoading ? '签到中…' : canCheckin ? '签到' : '已签到' }}
+              </button>
+              <Transition name="fade">
+                <span v-if="showCheckinHint" class="ch-checkin-hint">签到可获得 {{ rewardSummary }}</span>
+              </Transition>
+              <Transition name="fade">
+                <span v-if="checkinMsg" class="ch-checkin-result">{{ checkinMsg }}</span>
+              </Transition>
+            </div>
+            <button class="ch-recharge-btn" @click="handleRecharge">
+              <i class="pi pi-bolt"></i>
+              <span>充值中心</span>
+            </button>
             <div class="user-card-wrap">
               <button type="button" class="user-card" @click="toggleUserMenu($event)">
                 <div class="user-avatar">
@@ -520,17 +702,83 @@ async function submitUnbind() {
       </section>
     </div>
 
-    <!-- 卡密充值弹窗 -->
+    <!-- 充值中心弹窗 -->
     <Transition name="modal">
       <div v-if="showRechargeModal" class="modal-overlay" @click.self="closeRechargeModal">
-        <div class="modal-box">
+        <div class="modal-box modal-box--recharge">
           <div class="modal-header">
-            <h3>卡密充值</h3>
+            <h3><i class="pi pi-bolt" style="color:var(--app-primary);margin-right:6px"></i>充值中心</h3>
             <button type="button" class="modal-close" @click="closeRechargeModal">
               <i class="pi pi-times"></i>
             </button>
           </div>
-          <form class="modal-body" @submit.prevent="submitRecharge">
+
+          <div v-if="hasOnlinePay" class="rc-tabs">
+            <button class="rc-tab" :class="{ active: rechargeTab === 'online' }" @click="rechargeTab = 'online'">
+              <i class="pi pi-shopping-cart"></i> 在线支付
+            </button>
+            <button class="rc-tab" :class="{ active: rechargeTab === 'card' }" @click="rechargeTab = 'card'">
+              <i class="pi pi-credit-card"></i> 卡密兑换
+            </button>
+          </div>
+
+          <!-- 在线支付 -->
+          <div v-if="rechargeTab === 'online' && hasOnlinePay" class="rc-body">
+            <div v-if="packagesLoading" class="rc-loading">
+              <i class="pi pi-spin pi-spinner"></i> 加载套餐中…
+            </div>
+            <div v-else-if="packages.length === 0" class="rc-empty">暂无可购买的套餐</div>
+            <template v-else>
+              <div class="rc-packages">
+                <div
+                  v-for="pkg in packages" :key="pkg.id"
+                  class="rc-pkg-card"
+                  :class="{ selected: selectedPkg?.id === pkg.id }"
+                  @click="selectPackage(pkg)"
+                >
+                  <div class="rc-pkg-name">{{ pkg.name }}</div>
+                  <div class="rc-pkg-desc">{{ pkg.description || formatDuration(pkg.duration_seconds) }}</div>
+                  <div class="rc-pkg-price">
+                    <span class="rc-price-symbol">¥</span>
+                    <span class="rc-price-value">{{ formatPrice(pkg.price) }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="selectedPkg" class="rc-pay-methods">
+                <span class="rc-pay-label">支付方式</span>
+                <div class="rc-pay-options">
+                  <label v-if="hasWechat" class="rc-pay-opt" :class="{ active: selectedPayMethod === 'wechat' }">
+                    <input type="radio" v-model="selectedPayMethod" value="wechat" />
+                    <i class="pi pi-microsoft" style="color:#07c160"></i>
+                    <span>微信支付</span>
+                  </label>
+                  <label v-if="hasAlipay" class="rc-pay-opt" :class="{ active: selectedPayMethod === 'alipay' }">
+                    <input type="radio" v-model="selectedPayMethod" value="alipay" />
+                    <i class="pi pi-wallet" style="color:#1677ff"></i>
+                    <span>支付宝</span>
+                  </label>
+                </div>
+              </div>
+
+              <Transition name="fade">
+                <div v-if="rechargeErrMsg" class="modal-msg modal-msg--err">
+                  <i class="pi pi-exclamation-circle"></i>{{ rechargeErrMsg }}
+                </div>
+              </Transition>
+
+              <button class="rc-pay-btn" :disabled="!selectedPkg || rechargeLoading" @click="startPay">
+                <i v-if="rechargeLoading" class="pi pi-spin pi-spinner"></i>
+                <template v-else>
+                  <i class="pi pi-bolt"></i>
+                  立即支付 {{ selectedPkg ? '¥' + formatPrice(selectedPkg.price) : '' }}
+                </template>
+              </button>
+            </template>
+          </div>
+
+          <!-- 卡密兑换 -->
+          <form v-if="rechargeTab === 'card'" class="modal-body" @submit.prevent="submitRecharge">
             <div class="modal-field">
               <label>当前账号</label>
               <div class="modal-acctno">{{ userStore.userInfo?.phone || userStore.userInfo?.username || '-' }}</div>
@@ -539,7 +787,6 @@ async function submitUnbind() {
               <label>卡密</label>
               <InputText v-model="rechargeCardKey" placeholder="请输入卡密" class="modal-input" />
             </div>
-
             <Transition name="fade">
               <div v-if="rechargeErrMsg" class="modal-msg modal-msg--err">
                 <i class="pi pi-exclamation-circle"></i>{{ rechargeErrMsg }}
@@ -548,9 +795,36 @@ async function submitUnbind() {
                 <i class="pi pi-check-circle"></i>{{ rechargeSuccessMsg }}
               </div>
             </Transition>
-
             <Button type="submit" label="充 值" :loading="rechargeLoading" class="modal-submit" />
           </form>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 支付等待弹窗 -->
+    <Transition name="modal">
+      <div v-if="showQrModal" class="modal-overlay" @click.self="closeQrModal">
+        <div class="modal-box qr-modal">
+          <div class="modal-header">
+            <h3>{{ selectedPayMethod === 'wechat' ? '微信支付' : '支付宝支付' }}</h3>
+            <button type="button" class="modal-close" @click="closeQrModal"><i class="pi pi-times"></i></button>
+          </div>
+          <div class="qr-body">
+            <div v-if="payStatus === 'pending'" class="qr-wrap">
+              <img :src="payQrUrl" alt="支付二维码" class="qr-img" />
+              <p class="qr-hint">请使用{{ selectedPayMethod === 'wechat' ? '微信' : '支付宝' }}扫码支付</p>
+              <p class="qr-amount">¥{{ selectedPkg ? formatPrice(selectedPkg.price) : '' }}</p>
+              <div class="qr-polling"><i class="pi pi-spin pi-spinner"></i> 等待支付结果…</div>
+            </div>
+            <div v-else-if="payStatus === 'paid'" class="qr-result qr-result--ok">
+              <i class="pi pi-check-circle"></i>
+              <p>支付成功！</p>
+            </div>
+            <div v-else class="qr-result qr-result--fail">
+              <i class="pi pi-times-circle"></i>
+              <p>支付失败，请重试</p>
+            </div>
+          </div>
         </div>
       </div>
     </Transition>
@@ -724,6 +998,79 @@ async function submitUnbind() {
         <p class="banned-countdown">{{ bannedCountdown }} 秒后自动退出登录</p>
       </div>
     </div>
+
+    <!-- Floating Contact Button (right edge, vertical) -->
+    <Transition name="contact-float">
+      <div v-if="showContactFloat && hasContactImages" class="contact-float" :class="{ 'contact-highlight': contactHighlight }">
+        <button class="contact-float-main" @click="showContactModal = true">
+          <i class="pi pi-comments"></i>
+          <span>联</span><span>系</span><span>我</span><span>们</span>
+        </button>
+        <button class="contact-float-x" @click="closeContactFloat"><i class="pi pi-times"></i></button>
+      </div>
+    </Transition>
+
+    <!-- Contact Images Modal -->
+    <Transition name="modal">
+      <div v-if="showContactModal" class="contact-modal-overlay" @click.self="showContactModal = false">
+        <div class="contact-modal-box">
+          <div class="contact-modal-header">
+            <h3>联系我们</h3>
+            <button type="button" class="contact-modal-close" @click="showContactModal = false"><i class="pi pi-times"></i></button>
+          </div>
+          <div class="contact-modal-body">
+            <img v-for="(img, idx) in cachedImages" :key="idx" :src="img" class="contact-img" alt="联系方式" />
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 版本更新弹窗 -->
+    <Transition name="modal">
+      <div v-if="showUpdateDialog && updateInfo?.has_update" class="modal-overlay update-overlay">
+        <div class="update-dialog">
+          <div class="update-header">
+            <h3><i class="pi pi-arrow-circle-up" style="color:var(--app-primary);margin-right:6px"></i>发现新版本 V{{ updateInfo.latest_version }}</h3>
+            <button v-if="!updateInfo.force_update" type="button" class="modal-close" @click="dismissUpdate"><i class="pi pi-times"></i></button>
+          </div>
+          <div class="update-body">
+            <div class="update-left">
+              <div
+                v-for="(u, idx) in updateInfo.updates" :key="u.version"
+                class="update-ver-item" :class="{ active: selectedUpdateIdx === idx }"
+                @click="selectedUpdateIdx = idx"
+              >
+                <div class="update-ver-name">版本 {{ u.version }}</div>
+                <div v-if="u.force_update" class="update-ver-force">强制更新</div>
+                <div class="update-ver-date">{{ u.created_at }}</div>
+              </div>
+            </div>
+            <div class="update-right">
+              <template v-if="updateInfo.updates[selectedUpdateIdx]">
+                <div class="update-detail-title">
+                  版本 {{ updateInfo.updates[selectedUpdateIdx].version }} 更新内容如下
+                </div>
+                <div class="update-detail-content" v-html="updateInfo.updates[selectedUpdateIdx].description || '暂无更新说明'"></div>
+              </template>
+            </div>
+          </div>
+          <div class="update-footer">
+            <div v-if="downloadStatus === 'downloading'" class="update-progress">
+              <div class="update-progress-bar"><div class="update-progress-fill" :style="{ width: downloadProgress + '%' }"></div></div>
+              <span>下载中 {{ downloadProgress }}%</span>
+            </div>
+            <div v-else-if="downloadStatus === 'installing'" class="update-progress">
+              <i class="pi pi-spin pi-spinner"></i> <span>正在安装…</span>
+            </div>
+            <div v-else-if="downloadStatus === 'error'" class="update-err">{{ downloadError }}</div>
+            <template v-else>
+              <button v-if="!updateInfo.force_update" class="vm-btn vm-btn--outline" @click="dismissUpdate">稍后提醒</button>
+              <button class="vm-btn vm-btn--primary" @click="applyUpdate"><i class="pi pi-download"></i> 立即更新</button>
+            </template>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -958,6 +1305,120 @@ async function submitUnbind() {
   align-items: center;
   gap: 12px;
 }
+
+.ch-tutorial-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: 1px solid var(--app-primary-border, #86efac);
+  border-radius: 6px;
+  background: var(--app-primary-light, #f0fdf4);
+  color: var(--app-primary, #22c55e);
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ch-tutorial-btn:hover {
+  background: var(--app-primary-light-hover, #dcfce7);
+  border-color: var(--app-primary, #22c55e);
+}
+
+.ch-checkin-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.ch-checkin-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: 1px solid var(--app-primary-border, #86efac);
+  border-radius: 6px;
+  background: var(--app-primary, #22c55e);
+  color: #fff;
+  font-size: 0.78rem;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.ch-checkin-btn:hover:not(:disabled) {
+  background: var(--app-primary-hover, #16a34a);
+  border-color: var(--app-primary-hover, #16a34a);
+}
+.ch-checkin-btn:disabled { opacity: 0.65; cursor: default; }
+.ch-checkin-done {
+  background: var(--app-primary-light, #f0fdf4) !important;
+  color: var(--app-primary, #22c55e) !important;
+  border-color: var(--app-primary-border, #86efac) !important;
+}
+.ch-checkin-hint {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 4px 10px;
+  background: var(--app-primary, #22c55e);
+  color: #fff;
+  font-size: 0.7rem;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(34, 197, 94, 0.3);
+  z-index: 10;
+  pointer-events: none;
+}
+.ch-checkin-hint::before {
+  content: '';
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: var(--app-primary, #22c55e);
+}
+.ch-checkin-result {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  padding: 4px 10px;
+  background: #0f172a;
+  color: #fff;
+  font-size: 0.7rem;
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  z-index: 10;
+  pointer-events: none;
+}
+
+/* ── Recharge Center Button ── */
+.ch-recharge-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 18px;
+  border: none;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #f59e0b, #f97316);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(245, 158, 11, 0.4);
+  transition: all 0.2s;
+  letter-spacing: 0.03em;
+}
+.ch-recharge-btn:hover {
+  background: linear-gradient(135deg, #f97316, #ef4444);
+  box-shadow: 0 4px 16px rgba(249, 115, 22, 0.5);
+  transform: translateY(-1px);
+}
+.ch-recharge-btn .pi { font-size: 0.85rem; }
 
 /* ── User Card (clickable) ── */
 .user-card-wrap {
@@ -1313,6 +1774,193 @@ async function submitUnbind() {
   transform: translateY(-4px);
 }
 
+/* ── Recharge Center Modal ── */
+.modal-box--recharge { width: 480px; }
+
+.rc-tabs {
+  display: flex;
+  border-bottom: 2px solid #f1f5f9;
+  padding: 0 24px;
+}
+.rc-tab {
+  flex: 1;
+  padding: 12px 0;
+  border: none;
+  background: none;
+  font-size: 0.88rem;
+  font-weight: 600;
+  font-family: inherit;
+  color: #94a3b8;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.rc-tab.active { color: var(--app-primary, #22c55e); }
+.rc-tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 20%;
+  right: 20%;
+  height: 2px;
+  background: var(--app-primary, #22c55e);
+  border-radius: 1px;
+}
+
+.rc-body { padding: 20px 24px; }
+.rc-loading, .rc-empty {
+  text-align: center;
+  padding: 32px 0;
+  color: #94a3b8;
+  font-size: 0.85rem;
+}
+
+.rc-packages {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.rc-pkg-card {
+  padding: 14px 10px;
+  border: 2px solid #e2e8f0;
+  border-radius: 12px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  background: #fff;
+}
+.rc-pkg-card:hover { border-color: var(--app-primary-border, #86efac); background: #f0fdf4; }
+.rc-pkg-card.selected {
+  border-color: var(--app-primary, #22c55e);
+  background: linear-gradient(135deg, #f0fdf4, #ecfdf5);
+  box-shadow: 0 0 0 1px var(--app-primary, #22c55e);
+}
+.rc-pkg-name {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 4px;
+}
+.rc-pkg-desc {
+  font-size: 0.7rem;
+  color: #64748b;
+  margin-bottom: 8px;
+}
+.rc-pkg-price { color: #ef4444; font-weight: 700; }
+.rc-price-symbol { font-size: 0.75rem; }
+.rc-price-value { font-size: 1.2rem; }
+
+.rc-pay-methods {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 10px;
+}
+.rc-pay-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #475569;
+  white-space: nowrap;
+}
+.rc-pay-options { display: flex; gap: 10px; }
+.rc-pay-opt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.78rem;
+  color: #334155;
+  transition: all 0.15s;
+  background: #fff;
+}
+.rc-pay-opt input { display: none; }
+.rc-pay-opt.active {
+  border-color: var(--app-primary, #22c55e);
+  background: #f0fdf4;
+  color: var(--app-primary, #22c55e);
+  font-weight: 600;
+}
+
+.rc-pay-btn {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--app-primary, #22c55e), var(--app-primary-hover, #16a34a));
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.2s;
+  box-shadow: 0 4px 14px rgba(34, 197, 94, 0.3);
+}
+.rc-pay-btn:hover:not(:disabled) {
+  box-shadow: 0 6px 20px rgba(34, 197, 94, 0.4);
+  transform: translateY(-1px);
+}
+.rc-pay-btn:disabled { opacity: 0.6; cursor: default; }
+
+/* QR Modal */
+.qr-modal { width: 360px; }
+.qr-body {
+  padding: 24px;
+  text-align: center;
+}
+.qr-wrap { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.qr-img {
+  width: 200px;
+  height: 200px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 8px;
+}
+.qr-hint { font-size: 0.82rem; color: #64748b; margin: 0; }
+.qr-browser-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 24px 0;
+  color: var(--app-primary, #22c55e);
+}
+.qr-browser-hint .pi { font-size: 2.5rem; }
+.qr-browser-hint p { margin: 0; font-size: 0.95rem; font-weight: 600; }
+.qr-amount { font-size: 1.4rem; font-weight: 800; color: #ef4444; margin: 0; }
+.qr-polling {
+  font-size: 0.78rem;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.qr-result {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 0;
+}
+.qr-result .pi { font-size: 3rem; }
+.qr-result p { font-size: 1rem; font-weight: 600; margin: 0; }
+.qr-result--ok { color: var(--app-primary, #22c55e); }
+.qr-result--fail { color: #ef4444; }
+
 /* ── Profile Modal ── */
 .modal-box--profile {
   width: 440px;
@@ -1524,4 +2172,126 @@ async function submitUnbind() {
 .email-code-btn:disabled {
   opacity: 0.6;
 }
+
+/* ─── Floating Contact Button (right edge vertical) ─── */
+.contact-float {
+  position: fixed;
+  right: 0;
+  top: 80%;
+  transform: translateY(-50%);
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border-radius: 8px 0 0 8px;
+  background: var(--app-primary, #22c55e);
+  box-shadow: -2px 2px 12px rgba(0,0,0,0.12);
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+}
+.contact-float:hover {
+  box-shadow: -2px 2px 16px rgba(34,197,94,0.3);
+}
+.contact-float-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 7px;
+  border: none;
+  background: transparent;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  line-height: 1.3;
+  letter-spacing: 0.05em;
+}
+.contact-float-main .pi { font-size: 1rem; margin-bottom: 4px; }
+.contact-float-x {
+  width: 100%;
+  padding: 4px 0;
+  border: none;
+  border-top: 1px solid rgba(255,255,255,0.25);
+  background: transparent;
+  color: rgba(255,255,255,0.7);
+  font-size: 0.6rem;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.contact-float-x:hover { color: #fff; }
+.contact-highlight { animation: contact-pulse 0.6s ease-in-out 3; }
+@keyframes contact-pulse {
+  0%, 100% { box-shadow: -2px 2px 12px rgba(0,0,0,0.12); }
+  50% { box-shadow: -2px 0 0 6px rgba(34,197,94,0.3), -2px 2px 16px rgba(34,197,94,0.2); }
+}
+.contact-float-enter-active, .contact-float-leave-active { transition: all 0.3s ease; }
+.contact-float-enter-from, .contact-float-leave-to { opacity: 0; transform: translateY(-50%) translateX(40px); }
+
+.contact-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1100; }
+.contact-modal-box { background: #fff; border-radius: 12px; width: 520px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.15); overflow: hidden; }
+.contact-modal-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 20px; border-bottom: 1px solid #e2e8f0; }
+.contact-modal-header h3 { margin: 0; font-size: 1rem; }
+.contact-modal-close { width: 28px; height: 28px; border: none; background: #f1f5f9; border-radius: 6px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: #64748b; }
+.contact-modal-close:hover { background: #e2e8f0; color: #0f172a; }
+.contact-modal-body { padding: 20px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+.contact-img { max-width: 200px; max-height: 200px; border-radius: 8px; border: 1px solid #e2e8f0; object-fit: contain; }
+
+/* ── Update Dialog ── */
+.update-overlay { z-index: 2000; }
+.update-dialog {
+  width: 640px; max-width: 90vw; background: #fff; border-radius: 16px;
+  box-shadow: 0 20px 60px rgba(15,23,42,0.25); overflow: hidden; display: flex; flex-direction: column;
+}
+.update-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 24px 16px; border-bottom: 1px solid #f1f5f9;
+}
+.update-header h3 { margin: 0; font-size: 1.1rem; font-weight: 700; }
+.update-body { display: flex; min-height: 260px; max-height: 400px; }
+.update-left {
+  width: 200px; border-right: 1px solid #f1f5f9; overflow-y: auto; flex-shrink: 0;
+  padding: 8px;
+}
+.update-ver-item {
+  padding: 10px 12px; border-radius: 8px; cursor: pointer;
+  margin-bottom: 4px; transition: background 0.15s;
+}
+.update-ver-item:hover { background: #f8fafc; }
+.update-ver-item.active {
+  background: var(--app-primary-light, #f0fdf4);
+  border-left: 3px solid var(--app-primary, #22c55e);
+}
+.update-ver-name { font-size: 0.88rem; font-weight: 600; color: #0f172a; }
+.update-ver-force {
+  font-size: 0.68rem; color: #dc2626; background: #fef2f2;
+  padding: 1px 6px; border-radius: 3px; display: inline-block; margin-top: 2px;
+}
+.update-ver-date { font-size: 0.72rem; color: #94a3b8; margin-top: 2px; }
+.update-right { flex: 1; padding: 16px 20px; overflow-y: auto; }
+.update-detail-title { font-size: 0.92rem; font-weight: 700; color: #0f172a; margin-bottom: 12px; }
+.update-detail-content { font-size: 0.85rem; color: #475569; line-height: 1.7; }
+.update-detail-content :deep(p) { margin: 4px 0; }
+.update-detail-content :deep(ul) { margin: 4px 0; padding-left: 20px; }
+.update-footer {
+  display: flex; align-items: center; justify-content: flex-end; gap: 10px;
+  padding: 16px 24px; border-top: 1px solid #f1f5f9;
+}
+.update-progress { display: flex; align-items: center; gap: 10px; flex: 1; }
+.update-progress-bar {
+  flex: 1; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden;
+}
+.update-progress-fill {
+  height: 100%; background: var(--app-primary, #22c55e); border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.update-err { color: #dc2626; font-size: 0.82rem; flex: 1; }
+.vm-btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 18px;
+  border: 1.5px solid #e2e8f0; border-radius: 8px; background: #fff;
+  font-size: 0.85rem; font-weight: 600; font-family: inherit; cursor: pointer;
+}
+.vm-btn--primary { background: var(--app-primary, #22c55e); color: #fff; border-color: var(--app-primary, #22c55e); }
+.vm-btn--outline { background: #fff; color: #64748b; }
 </style>

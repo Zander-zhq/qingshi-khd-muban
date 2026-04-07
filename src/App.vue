@@ -13,13 +13,15 @@ import GlobalDialog from '@/components/GlobalDialog.vue'
 import { showDialog } from '@/utils/dialog'
 import { syncServerTime } from '@/utils/sign'
 import { fetchAppConfig } from '@/utils/config'
+import { getBrand, VERSION } from '@/brand'
+import { appStorage } from '@/utils/storage'
 
 let unlisten: UnlistenFn | null = null
 
 async function syncTray() {
   try {
     const autostart = await isEnabled()
-    const closeMode = localStorage.getItem('close_mode') || 'exit'
+    const closeMode = appStorage.getItem('close_mode') || 'exit'
     await invoke('sync_tray_checks', { autostart, closeMode })
   } catch { /* ignore */ }
 }
@@ -36,15 +38,15 @@ onMounted(async () => {
         window.location.reload()
         break
       case 'clear_cache': {
-        const keepKeys = ['saved_accounts', 'token', 'userInfo', 'close_mode']
+        const keepKeys = ['saved_accounts', 'token', 'userInfo', 'close_mode', 'brand_config', 'active_brand_id']
         const saved: Record<string, string> = {}
         keepKeys.forEach(k => {
-          const v = localStorage.getItem(k)
+          const v = appStorage.getItem(k)
           if (v) saved[k] = v
         })
         sessionStorage.clear()
-        localStorage.clear()
-        Object.entries(saved).forEach(([k, v]) => localStorage.setItem(k, v))
+        appStorage.clear()
+        Object.entries(saved).forEach(([k, v]) => appStorage.setItem(k, v))
         window.location.reload()
         break
       }
@@ -57,17 +59,19 @@ onMounted(async () => {
         await syncTray()
         break
       case 'close_exit':
-        localStorage.setItem('close_mode', 'exit')
+        appStorage.setItem('close_mode', 'exit')
         break
       case 'close_minimize':
-        localStorage.setItem('close_mode', 'minimize')
+        appStorage.setItem('close_mode', 'minimize')
         break
-      case 'about':
+      case 'about': {
+        const brand = getBrand()
         await showDialog({
           title: '关于',
-          message: '青拾·视频下载 V1.1.1\n© 2024-2026 青拾',
+          message: `${brand.brand_name}·${brand.product_name} ${VERSION}\n${brand.about || `© ${new Date().getFullYear()} ${brand.brand_name}`}`,
         })
         break
+      }
     }
   })
 })

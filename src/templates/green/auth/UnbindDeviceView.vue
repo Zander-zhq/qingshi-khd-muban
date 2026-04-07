@@ -159,7 +159,7 @@ function handleSelectDevice() {
 
 <style scoped>
 .window-shell { height: 100vh; width: 100vw; background: #fff; }
-.window-content { height: 100%; width: 100%; display: flex; flex-direction: column; background: #fff; overflow: hidden; }
+.window-content { height: 100%; width: 100%; display: flex; flex-direction: column; background: #fff; overflow-y: auto; }
 .window-content :deep(.app-titlebar.titlebar-compact) { position: relative; }
 
 .banner { height: 100px; position: relative; background: var(--qs-bg-gradient); flex-shrink: 0; overflow: visible; display: flex; align-items: center; justify-content: center; }

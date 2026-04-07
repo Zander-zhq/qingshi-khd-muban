@@ -158,7 +158,7 @@ function handleSelectDevice() {
 
 <style scoped>
 .window-shell { height: 100vh; width: 100vw; background: #0F172A; }
-.window-content { height: 100%; width: 100%; display: flex; flex-direction: column; background: #0F172A; overflow: hidden; }
+.window-content { height: 100%; width: 100%; display: flex; flex-direction: column; background: #0F172A; overflow-y: auto; }
 
 .body {
   flex: 1;

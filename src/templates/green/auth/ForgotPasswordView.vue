@@ -200,7 +200,7 @@ async function handleResetPassword() {
   display: flex;
   flex-direction: column;
   background: #fff;
-  overflow: hidden;
+  overflow-y: auto;
   position: relative;
 }
 

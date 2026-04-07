@@ -162,7 +162,7 @@ async function handleRegister() {
   display: flex;
   flex-direction: column;
   background: #0F172A;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .body {

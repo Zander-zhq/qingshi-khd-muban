@@ -6,28 +6,39 @@ import ConfirmationService from 'primevue/confirmationservice'
 import 'primeicons/primeicons.css'
 import './styles/global.css'
 import App from './App.vue'
-import router from './router'
+import { initBrand, applyThemeVars } from './brand'
+import { initAppStorage } from './utils/storage'
 
-const app = createApp(App)
+async function bootstrap() {
+  await initAppStorage()
+  await initBrand()
+  applyThemeVars()
 
-app.use(createPinia())
-app.use(router)
-app.use(PrimeVue, {
-  theme: {
-    preset: Aura,
-    options: {
-      prefix: 'p',
-      darkModeSelector: '.app-dark',
-      cssLayer: false,
+  const { default: router } = await import('./router')
+
+  const app = createApp(App)
+
+  app.use(createPinia())
+  app.use(router)
+  app.use(PrimeVue, {
+    theme: {
+      preset: Aura,
+      options: {
+        prefix: 'p',
+        darkModeSelector: '.app-dark',
+        cssLayer: false,
+      },
     },
-  },
-  locale: {
-    passwordPrompt: '请输入密码',
-    weak: '弱',
-    medium: '中等',
-    strong: '强',
-  },
-})
-app.use(ConfirmationService)
+    locale: {
+      passwordPrompt: '请输入密码',
+      weak: '弱',
+      medium: '中等',
+      strong: '强',
+    },
+  })
+  app.use(ConfirmationService)
 
-app.mount('#app')
+  app.mount('#app')
+}
+
+bootstrap()
