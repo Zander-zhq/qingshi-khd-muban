@@ -5,33 +5,16 @@
  * 每条路由不需要写 /main 前缀，直接写子路径即可。
  *
  * 示例：
- *   { path: 'editor', name: 'Editor', component: () => import('./pages/EditorView.vue') }
+ *   {
+ *     path: 'editor',
+ *     name: 'Editor',
+ *     component: () => import('./pages/EditorView.vue'),
+ *     meta: { title: `编辑器 - ${brand.brand_name}`, requiresAuth: true },
+ *   }
  *   访问地址为 /main/editor
  */
 import type { RouteRecordRaw } from 'vue-router'
-import { getBrand } from '../brand'
 
-const brand = getBrand()
-
-const appRoutes: RouteRecordRaw[] = [
-  {
-    path: 'downloads',
-    name: 'Downloads',
-    component: () => import('./pages/PlaceholderView.vue'),
-    meta: { title: `下载列表 - ${brand.brand_name}`, requiresAuth: true },
-  },
-  {
-    path: 'history',
-    name: 'History',
-    component: () => import('./pages/PlaceholderView.vue'),
-    meta: { title: `下载历史 - ${brand.brand_name}`, requiresAuth: true },
-  },
-  {
-    path: 'settings',
-    name: 'Settings',
-    component: () => import('./pages/PlaceholderView.vue'),
-    meta: { title: `设置 - ${brand.brand_name}`, requiresAuth: true },
-  },
-]
+const appRoutes: RouteRecordRaw[] = []
 
 export default appRoutes
