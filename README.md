@@ -77,9 +77,10 @@
 | `[基础框架]` | 所有产品共用的代码 | 不修改，通过 upstream 同步更新 |
 | `[产品专属]` | 每个产品自己的代码 | 自由修改，不会与模板冲突 |
 
-**产品开发只需要关注两个地方：**
-1. `src-tauri/src/app_config.rs` — 填入产品的 APP_ID 和 APP_KEY
-2. `src/app/` — 编写业务页面和路由
+**产品开发只需要关注三个地方：**
+1. `src-tauri/src/app_config.rs` — 填入产品的 APP_ID 和 APP_KEY（Rust 端）
+2. `.env` — 填入 API 服务器地址（前端，控制连接开发/正式服务器）
+3. `src/app/` — 编写业务页面和路由
 
 ---
 
@@ -137,6 +138,13 @@ git remote add upstream https://github.com/Zander-zhq/qingshi-khd-muban.git
 
 ### 3. 修改产品配置
 
+每个产品有两个配置文件，互相有注释指引：
+
+| 文件 | 内容 | 切换场景 |
+|------|------|---------|
+| `src-tauri/src/app_config.rs` | APP_ID、APP_KEY | 每个产品不同 |
+| `.env` | API 服务器地址 | 每个产品不同，开发/正式服务器切换 |
+
 #### 3.1 填入产品凭证
 
 编辑 `src-tauri/src/app_config.rs`：
@@ -146,7 +154,23 @@ pub const APP_ID: &str = "你的产品ID";
 pub const APP_KEY: &str = "你的产品密钥";
 ```
 
-#### 3.2 修改应用标识
+#### 3.2 配置 API 服务器地址
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`：
+
+```env
+# 开发阶段用开发服务器
+VITE_API_BASE_URL=https://km-dev.hygjx.com
+
+# 上线后切换为正式服务器
+# VITE_API_BASE_URL=https://km.hygjx.com
+```
+
+#### 3.3 修改应用标识
 
 编辑 `src-tauri/tauri.conf.json`：
 
@@ -181,13 +205,6 @@ name = "你的产品包名_lib"
 fn main() {
     你的产品包名_lib::run()
 }
-```
-
-#### 3.3 配置 API 地址
-
-```bash
-cp .env.example .env
-# 编辑 .env，设置 VITE_API_BASE_URL
 ```
 
 ### 4. 开发业务页面
