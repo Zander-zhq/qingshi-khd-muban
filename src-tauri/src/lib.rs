@@ -701,6 +701,14 @@ fn read_file_base64(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn compute_file_sha256(path: String) -> Result<String, String> {
+    let clean = path.strip_prefix(r"\\?\").unwrap_or(&path);
+    let bytes = fs::read(clean).map_err(|e| format!("读取文件失败: {}", e))?;
+    let hash = Sha256::digest(&bytes);
+    Ok(hex::encode(hash))
+}
+
+#[tauri::command]
 async fn download_file_to_dir(
     app: AppHandle,
     url: String,
@@ -804,6 +812,7 @@ pub fn run() {
             start_version_build,
             update_version_in_source,
             read_file_base64,
+            compute_file_sha256,
             download_file_to_dir,
             get_download_dir,
             run_installer_and_exit

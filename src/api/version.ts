@@ -16,6 +16,7 @@ export interface CheckUpdateResult {
   current_version: string
   latest_version: string
   download_url: string | null
+  file_hash: string | null
   force_update: boolean
   updates: UpdateVersion[]
 }
@@ -23,6 +24,7 @@ export interface CheckUpdateResult {
 export interface UploadExeResult {
   url: string
   filename: string
+  sha256?: string
 }
 
 /** 检查更新（客户端用，不需要登录、不需要签名） */

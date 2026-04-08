@@ -809,6 +809,9 @@ function handleExpiredLogout() {
               <div class="update-progress-bar"><div class="update-progress-fill" :style="{ width: downloadProgress + '%' }"></div></div>
               <span>下载中 {{ downloadProgress }}%</span>
             </div>
+            <div v-else-if="downloadStatus === 'verifying'" class="update-progress">
+              <i class="pi pi-spin pi-spinner"></i> <span>校验文件完整性…</span>
+            </div>
             <div v-else-if="downloadStatus === 'installing'" class="update-progress">
               <i class="pi pi-spin pi-spinner"></i> <span>正在安装…</span>
             </div>

@@ -15,7 +15,7 @@ export function useVersionUpdate() {
   const showUpdateDialog = ref(false)
   const updateInfo = ref<CheckUpdateResult | null>(null)
   const downloadProgress = ref(0)
-  const downloadStatus = ref<'idle' | 'downloading' | 'installing' | 'done' | 'error'>('idle')
+  const downloadStatus = ref<'idle' | 'downloading' | 'verifying' | 'installing' | 'done' | 'error'>('idle')
   const downloadError = ref('')
   const selectedUpdateIdx = ref(0)
 
@@ -64,6 +64,16 @@ export function useVersionUpdate() {
         saveDir,
       })
       logger.log('version', '下载完成', { installerPath })
+
+      const expectedHash = updateInfo.value.file_hash
+      if (expectedHash) {
+        downloadStatus.value = 'verifying'
+        const actualHash = await invoke<string>('compute_file_sha256', { path: installerPath })
+        if (actualHash.toLowerCase() !== expectedHash.toLowerCase()) {
+          throw new Error('安装包校验失败，文件可能已被篡改，请重试')
+        }
+        logger.log('version', 'SHA256 校验通过')
+      }
 
       downloadStatus.value = 'installing'
       await invoke('run_installer_and_exit', { installerPath })
