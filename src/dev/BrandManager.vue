@@ -34,7 +34,7 @@ const pendingLogoPreview = ref('')
 const pendingContactPreviews = ref<string[]>([])
 
 const TEMPLATES = [
-  { id: 'green', label: '青拾（绿色）' },
+  { id: 'green', label: '经典（绿色）' },
   { id: 'orange', label: '华云（橙色）' },
   { id: 'dark', label: '科技（暗黑）' },
 ]

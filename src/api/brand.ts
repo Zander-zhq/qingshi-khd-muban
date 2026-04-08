@@ -6,8 +6,8 @@ import { getAppCredentials } from '../utils/config'
 /* ─── Template ID ↔ 服务端 label 映射 ─── */
 
 const TEMPLATE_TO_LABEL: Record<string, string> = {
-  green: '青拾（绿色）',
-  orange: '华云（橙色）',
+  green: '经典（绿色）',
+  orange: '活力（橙色）',
   dark: '科技（暗黑）',
 }
 const LABEL_TO_TEMPLATE: Record<string, string> = Object.fromEntries(

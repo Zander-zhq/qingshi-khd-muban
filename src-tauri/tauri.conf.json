@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "青拾",
+  "productName": "青拾客户端",
   "version": "0.1.0",
   "identifier": "com.qingshi.app",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "青拾",
+        "title": "加载中",
         "url": "/login",
         "width": 420,
         "height": 640,

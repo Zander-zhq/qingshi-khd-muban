@@ -6,15 +6,17 @@ import { invoke } from '@tauri-apps/api/core'
 import { showDialog } from '@/utils/dialog'
 import { exitApp } from '@/utils/window'
 import { appStorage } from '../utils/storage'
+import { getBrand, VERSION } from '../brand'
 
 defineProps<{
   variant?: 'full' | 'minimal' | 'auth'
   title?: string
 }>()
 
-const APP_BRAND = '青拾'
-const APP_PRODUCT = '视频下载'
-const APP_VERSION = 'V1.1.1'
+const brand = getBrand()
+const APP_BRAND = brand.brand_name
+const APP_PRODUCT = brand.product_name
+const APP_VERSION = VERSION
 
 const appWindow = getCurrentWindow()
 const isMaximized = ref(false)
@@ -135,7 +137,7 @@ async function onExit() {
 <template>
   <header class="app-titlebar" :class="{ 'titlebar-compact': variant === 'auth' }" style="-webkit-app-region: drag">
     <div class="tb-left">
-      <img class="tb-brand-icon" src="/app-icon.png" alt="青拾" />
+      <img class="tb-brand-icon" src="/app-icon.png" :alt="APP_BRAND" />
       <span class="tb-name">{{ APP_BRAND }}</span>
       <span class="tb-dot">·</span>
       <span class="tb-product">{{ APP_PRODUCT }}</span>

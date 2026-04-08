@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const APP_ID: &str = "1002";
-const APP_KEY: &str = "9b3292c63a464200b507fca8d6af5299";
+mod app_config;
+use app_config::{APP_ID, APP_KEY};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -866,7 +866,7 @@ pub fn run() {
 
             let _tray = TrayIconBuilder::with_id("main")
                 .icon(icon)
-                .tooltip("青拾")
+                .tooltip("应用加载中…")
                 .menu(&tray_menu)
                 .on_menu_event(|app: &AppHandle, event: tauri::menu::MenuEvent| {
                     match event.id().as_ref() {

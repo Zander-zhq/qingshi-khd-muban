@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { logger } from '../utils/logger'
 import { getBrand } from '../brand'
+import appRoutes from '../app/routes'
 
 const brand = getBrand()
 const t = brand.template
@@ -54,9 +55,7 @@ const router = createRouter({
       children: [
         { path: '', redirect: '/main/dashboard' },
         { path: 'dashboard', name: 'Dashboard', component: m.mainView, meta: { title: `仪表盘 - ${brand.brand_name}`, requiresAuth: true } },
-        { path: 'downloads', name: 'Downloads', component: () => import('../views/PlaceholderView.vue'), meta: { title: `下载列表 - ${brand.brand_name}`, requiresAuth: true } },
-        { path: 'history', name: 'History', component: () => import('../views/PlaceholderView.vue'), meta: { title: `下载历史 - ${brand.brand_name}`, requiresAuth: true } },
-        { path: 'settings', name: 'Settings', component: () => import('../views/PlaceholderView.vue'), meta: { title: `设置 - ${brand.brand_name}`, requiresAuth: true } },
+        ...appRoutes,
         ...(import.meta.env.DEV ? [
           { path: 'dev-brand', name: 'DevBrand', component: () => import('../dev/BrandManager.vue'), meta: { title: `品牌管理 - ${brand.brand_name}`, requiresAuth: true } },
           { path: 'dev-version', name: 'DevVersion', component: () => import('../dev/VersionManager.vue'), meta: { title: `版本管理 - ${brand.brand_name}`, requiresAuth: true } },

@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useUserStore } from '../stores/user'
+import { getBrand, VERSION } from '../brand'
 
-const APP_BRAND = '青拾'
-const APP_PRODUCT = '视频下载'
-const APP_VERSION = 'V1.1.1'
+const brand = getBrand()
+const APP_BRAND = brand.brand_name
+const APP_PRODUCT = brand.product_name
+const APP_VERSION = VERSION
 
 const userStore = useUserStore()
 

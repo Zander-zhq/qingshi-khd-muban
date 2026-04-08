@@ -31,12 +31,12 @@ export interface BrandConfig {
 }
 
 const DEFAULT_BRAND: BrandConfig = {
-  id: 'huayun',
-  brand_name: '华云',
-  product_name: '视频下载',
+  id: 'default',
+  brand_name: '我的应用',
+  product_name: '客户端',
   template: 'green',
   logo: 'app-icon.png',
-  about: '© 2024-2026 华云',
+  about: '© 2024-2026',
   website: '',
   tutorial_url: '',
   contact_images: [],
