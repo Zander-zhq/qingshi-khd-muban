@@ -394,4 +394,4 @@ export async function syncBrandFromServer(): Promise<void> {
   }
 }
 
-export const VERSION = 'V1.1.1'
+export const VERSION: string = import.meta.env.VITE_APP_VERSION || 'V1.1.4'

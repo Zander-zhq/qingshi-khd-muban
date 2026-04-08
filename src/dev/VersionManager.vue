@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import { VERSION, getBrand } from '../brand'
 import { useUserStore } from '../stores/user'
 import { getAppCredentials } from '../utils/config'
-import { checkUpdate, uploadExe, publishVersion } from '../api/version'
+import axios from 'axios'
+import { checkUpdate, fetchNextVersion, createVersion, uploadExe, updateVersion } from '../api/version'
 import type { UpdateVersion } from '../api/version'
 
 const userStore = useUserStore()
@@ -34,21 +35,23 @@ async function loadVersions() {
   finally { loading.value = false }
 }
 
-function nextVersion(v: string): string {
-  const parts = v.split('.').map(Number)
-  parts[parts.length - 1]++
-  return parts.join('.')
-}
-
 const showEditor = ref(false)
 const editVersion = ref('')
 const editDescription = ref('')
 const editForceUpdate = ref(false)
 const richRef = ref<HTMLElement | null>(null)
 
-function addVersion() {
-  const latest = versions.value.length > 0 ? versions.value[0].version : currentVersion
-  editVersion.value = nextVersion(latest)
+async function addVersion() {
+  try {
+    const { appId } = await getAppCredentials()
+    const res = await fetchNextVersion(appId)
+    editVersion.value = res.next
+  } catch {
+    const latest = versions.value.length > 0 ? versions.value[0].version : currentVersion
+    const parts = latest.split('.').map(Number)
+    parts[parts.length - 1]++
+    editVersion.value = parts.join('.')
+  }
   editDescription.value = ''
   editForceUpdate.value = false
   showEditor.value = true
@@ -69,6 +72,44 @@ const buildStatus = ref<'idle' | 'building' | 'done' | 'error'>('idle')
 const buildLogs = ref('')
 const buildOutputPath = ref('')
 const pendingVersion = ref('')
+const buildLogRef = ref<HTMLPreElement | null>(null)
+
+const BUILD_STATE_KEY = 'vm_build_state'
+
+function saveBuildState() {
+  localStorage.setItem(BUILD_STATE_KEY, JSON.stringify({
+    version: pendingVersion.value,
+    description: editDescription.value,
+    forceUpdate: editForceUpdate.value,
+  }))
+}
+
+function restoreBuildState(): boolean {
+  try {
+    const raw = localStorage.getItem(BUILD_STATE_KEY)
+    if (!raw) return false
+    const s = JSON.parse(raw)
+    if (s.version) {
+      pendingVersion.value = s.version
+      editDescription.value = s.description || ''
+      editForceUpdate.value = !!s.forceUpdate
+      return true
+    }
+  } catch { /* ignore */ }
+  return false
+}
+
+function clearBuildState() {
+  localStorage.removeItem(BUILD_STATE_KEY)
+}
+
+watch(buildLogs, () => {
+  nextTick(() => {
+    if (buildLogRef.value) {
+      buildLogRef.value.scrollTop = buildLogRef.value.scrollHeight
+    }
+  })
+})
 
 let buildLogUnlisten: UnlistenFn | null = null
 let buildCompleteUnlisten: UnlistenFn | null = null
@@ -86,6 +127,7 @@ async function setupBuildListeners() {
     } else {
       buildLogs.value += `\n❌ 构建失败: ${e.payload.error}\n`
       buildStatus.value = 'error'
+      clearBuildState()
     }
   })
 }
@@ -105,7 +147,9 @@ async function startBuildAndPublish() {
   buildStatus.value = 'building'
   uploadProgress.value = 0
   uploadStatus.value = 'idle'
+  pendingVersionId.value = 0
   showBuild.value = true
+  saveBuildState()
 
   try {
     const { getBrandLogo: getLogo, resolveImageUrl: resolve } = await import('../brand')
@@ -145,51 +189,87 @@ async function startBuildAndPublish() {
       brandName: brand.brand_name,
       productName: brand.product_name || brand.brand_name,
       logoData: logoData.startsWith('data:') ? logoData : '',
+      version: pendingVersion.value,
     })
   } catch (e: unknown) {
     buildStatus.value = 'error'
     buildLogs.value += `\n❌ 错误: ${e}\n`
+    clearBuildState()
   }
 }
 
 const uploadProgress = ref(0)
 const uploadStatus = ref<'idle' | 'uploading' | 'done' | 'error'>('idle')
 const uploadError = ref('')
+const pendingVersionId = ref<number>(0)
 
 async function startUpload(outputPath: string) {
+  if (!pendingVersion.value) {
+    restoreBuildState()
+  }
+  if (!pendingVersion.value) {
+    buildLogs.value += `\n❌ 版本号丢失，请关闭弹窗重新操作\n`
+    uploadStatus.value = 'error'
+    uploadError.value = '版本号丢失'
+    clearBuildState()
+    return
+  }
+
   buildLogs.value += `\n正在上传安装包到服务器…\n`
+  buildLogs.value += `版本号: ${pendingVersion.value}\n`
   uploadStatus.value = 'uploading'
   uploadProgress.value = 0
 
   try {
     const { appId } = await getAppCredentials()
-    const response = await fetch(`file://${outputPath.replace(/\\/g, '/')}`)
-    const blob = await response.blob()
-    const file = new File([blob], outputPath.split(/[\\/]/).pop() || 'setup.exe', { type: 'application/octet-stream' })
+
+    const base64Data = await invoke<string>('read_file_base64', { path: outputPath })
+    const binaryStr = atob(base64Data)
+    const bytes = new Uint8Array(binaryStr.length)
+    for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
+
+    const fileName = outputPath.split(/[\\/]/).pop() || 'setup.exe'
+    const file = new File([bytes], fileName, { type: 'application/octet-stream' })
+    buildLogs.value += `文件大小: ${(file.size / 1024 / 1024).toFixed(2)} MB\n`
 
     const res = await uploadExe(
       userStore.token, appId, pendingVersion.value, file,
       (p) => { uploadProgress.value = p },
     )
-
     buildLogs.value += `上传成功: ${res.url}\n`
-    uploadStatus.value = 'done'
 
-    buildLogs.value += `正在发布版本信息…\n`
-    await publishVersion(userStore.token, {
+    buildLogs.value += `正在创建版本记录…\n`
+    const createRes = await createVersion(userStore.token, {
       app_id: appId,
       version: pendingVersion.value,
       description: editDescription.value,
       force_update: editForceUpdate.value,
+    })
+    pendingVersionId.value = createRes.id
+    buildLogs.value += `版本记录已创建 (ID: ${createRes.id})\n`
+
+    buildLogs.value += `正在更新版本下载地址…\n`
+    await updateVersion(userStore.token, pendingVersionId.value, {
       download_url: res.url,
     })
+
+    uploadStatus.value = 'done'
     buildLogs.value += `✅ 版本 ${pendingVersion.value} 发布成功!\n`
     toast('版本发布成功')
+    clearBuildState()
     await loadVersions()
-  } catch (err) {
+  } catch (err: unknown) {
     uploadStatus.value = 'error'
-    uploadError.value = err instanceof Error ? err.message : String(err)
-    buildLogs.value += `❌ 上传/发布失败: ${uploadError.value}\n`
+    let detail = ''
+    if (axios.isAxiosError(err) && err.response) {
+      const d = err.response.data
+      detail = `[${err.response.status}] ${d?.msg || d?.message || JSON.stringify(d)}`
+    } else {
+      detail = err instanceof Error ? err.message : String(err)
+    }
+    uploadError.value = detail
+    buildLogs.value += `❌ 上传/发布失败: ${detail}\n`
+    clearBuildState()
   }
 }
 
@@ -202,7 +282,12 @@ onMounted(async () => {
   await loadVersions()
   await setupBuildListeners()
   const running = await invoke<boolean>('is_build_running')
-  if (running) { buildStatus.value = 'building'; showBuild.value = true }
+  if (running) {
+    restoreBuildState()
+    buildStatus.value = 'building'
+    showBuild.value = true
+    buildLogs.value = `[恢复] 构建仍在运行中，版本: ${pendingVersion.value || '未知'}…\n`
+  }
 })
 onUnmounted(cleanupBuildListeners)
 </script>
@@ -307,14 +392,41 @@ onUnmounted(cleanupBuildListeners)
         <div class="vm-build">
           <div class="vm-build-header">
             <h3>打包版本 V{{ pendingVersion }}</h3>
-            <span v-if="buildStatus === 'building'" class="vm-build-status vm-build-status--building">构建中…</span>
-            <span v-else-if="uploadStatus === 'uploading'" class="vm-build-status vm-build-status--building">上传中 {{ uploadProgress }}%</span>
-            <span v-else-if="buildStatus === 'done' && uploadStatus === 'done'" class="vm-build-status vm-build-status--done">发布成功</span>
-            <span v-else-if="buildStatus === 'error' || uploadStatus === 'error'" class="vm-build-status vm-build-status--error">失败</span>
-            <button v-if="buildStatus !== 'building'" class="vm-editor-close" @click="closeBuild"><i class="pi pi-times"></i></button>
+            <span v-if="buildStatus === 'building'" class="vm-build-badge vm-build-badge--building">
+              <i class="pi pi-spin pi-spinner"></i> 构建中…
+            </span>
+            <span v-else-if="uploadStatus === 'uploading'" class="vm-build-badge vm-build-badge--building">
+              <i class="pi pi-spin pi-spinner"></i> 上传中 {{ uploadProgress }}%
+            </span>
+            <span v-else-if="buildStatus === 'done' && uploadStatus === 'done'" class="vm-build-badge vm-build-badge--done">
+              <i class="pi pi-check-circle"></i> 发布成功
+            </span>
+            <span v-else-if="buildStatus === 'error' || uploadStatus === 'error'" class="vm-build-badge vm-build-badge--error">
+              <i class="pi pi-times-circle"></i> 失败
+            </span>
+            <button v-if="buildStatus !== 'building' && uploadStatus !== 'uploading'" class="vm-editor-close" @click="closeBuild">
+              <i class="pi pi-times"></i>
+            </button>
           </div>
-          <div class="vm-build-body">
-            <pre class="vm-build-log">{{ buildLogs }}</pre>
+
+          <div v-if="buildStatus === 'building' || uploadStatus === 'uploading'" class="vm-build-progress">
+            <div class="vm-progress-track">
+              <div v-if="uploadStatus === 'uploading'" class="vm-progress-bar vm-progress-bar--real" :style="{ width: uploadProgress + '%' }"></div>
+              <div v-else class="vm-progress-bar"></div>
+            </div>
+          </div>
+
+          <div v-if="buildOutputPath" class="vm-build-output">
+            <i class="pi pi-folder-open"></i>
+            <span>{{ buildOutputPath }}</span>
+          </div>
+
+          <div class="vm-build-log-wrap">
+            <div class="vm-build-log-header">
+              <span>构建日志</span>
+              <button class="vm-btn vm-btn--sm" @click="buildLogs = ''">清空</button>
+            </div>
+            <pre ref="buildLogRef" class="vm-build-log">{{ buildLogs }}</pre>
           </div>
         </div>
       </div>
@@ -432,25 +544,69 @@ onUnmounted(cleanupBuildListeners)
 
 /* Build modal */
 .vm-build {
-  width: 680px; max-width: 90vw; max-height: 80vh; background: #fff; border-radius: 16px;
+  width: 680px; max-width: 90vw; height: 520px; background: #fff; border-radius: 16px;
   box-shadow: 0 20px 60px rgba(15,23,42,0.2); overflow: hidden; display: flex; flex-direction: column;
 }
 .vm-build-header {
-  display: flex; align-items: center; gap: 12px; padding: 20px 24px 16px;
+  display: flex; align-items: center; gap: 10px; padding: 18px 22px 14px;
   border-bottom: 1px solid #f1f5f9;
 }
-.vm-build-header h3 { margin: 0; font-size: 1.1rem; font-weight: 700; flex: 1; }
-.vm-build-status { font-size: 0.78rem; padding: 3px 10px; border-radius: 6px; font-weight: 600; }
-.vm-build-status--building { background: #fef3c7; color: #92400e; }
-.vm-build-status--done { background: #f0fdf4; color: #166534; }
-.vm-build-status--error { background: #fef2f2; color: #dc2626; }
-.vm-build-body { padding: 16px 24px 20px; overflow: auto; flex: 1; }
-.vm-build-log {
-  font-family: 'Cascadia Code', Consolas, monospace; font-size: 0.78rem;
-  line-height: 1.6; color: #334155; white-space: pre-wrap; word-break: break-all;
-  background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
-  padding: 16px; margin: 0; max-height: 50vh; overflow: auto;
+.vm-build-header h3 { margin: 0; font-size: 1rem; font-weight: 700; flex-shrink: 0; }
+.vm-build-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 0.75rem; font-weight: 600; padding: 3px 10px; border-radius: 20px;
 }
+.vm-build-badge--building { background: #EFF6FF; color: #2563EB; }
+.vm-build-badge--done { background: #F0FDF4; color: #16A34A; }
+.vm-build-badge--error { background: #FEF2F2; color: #DC2626; }
+.vm-build-header .vm-editor-close { margin-left: auto; }
+
+.vm-build-progress { padding: 0 22px; margin: 12px 0 0; }
+.vm-progress-track {
+  width: 100%; height: 4px; background: #E2E8F0; border-radius: 4px; overflow: hidden;
+}
+.vm-progress-bar {
+  width: 40%; height: 100%;
+  background: linear-gradient(90deg, var(--app-primary, #22c55e), #60A5FA);
+  border-radius: 4px; animation: vm-progress-slide 1.5s ease-in-out infinite;
+}
+.vm-progress-bar--real {
+  animation: none; transition: width 0.3s ease;
+  background: linear-gradient(90deg, var(--app-primary, #22c55e), #60A5FA);
+}
+@keyframes vm-progress-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+
+.vm-build-output {
+  margin: 12px 22px 0; padding: 10px 14px;
+  background: #F0FDF4; border: 1px solid #BBF7D0; border-radius: 8px;
+  font-size: 0.78rem; color: #166534;
+  display: flex; align-items: center; gap: 8px; word-break: break-all;
+}
+
+.vm-build-log-wrap {
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+  padding: 12px 22px 18px;
+}
+.vm-build-log-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px; font-size: 0.78rem; font-weight: 600; color: #475569;
+}
+.vm-btn--sm {
+  padding: 4px 10px; font-size: 0.72rem; border-radius: 6px;
+}
+.vm-build-log {
+  flex: 1; min-height: 0; overflow-y: auto; margin: 0; padding: 14px;
+  background: #0F172A; color: #A5F3FC; border-radius: 8px;
+  font-size: 0.72rem; line-height: 1.7;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  white-space: pre-wrap; word-break: break-all;
+}
+.vm-build-log::-webkit-scrollbar { width: 6px; }
+.vm-build-log::-webkit-scrollbar-track { background: transparent; }
+.vm-build-log::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
 
 /* Transitions */
 .toast-enter-active, .toast-leave-active { transition: all 0.3s ease; }

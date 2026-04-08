@@ -3,9 +3,11 @@ import axios from 'axios'
 const BASE_URL = import.meta.env.VITE_API_BASE_URL as string
 
 export interface UpdateVersion {
+  id?: number
   version: string
   description: string | null
   force_update: boolean
+  download_url?: string
   created_at: string
 }
 
@@ -23,7 +25,7 @@ export interface UploadExeResult {
   filename: string
 }
 
-/** 检查更新（不需要登录、不需要签名） */
+/** 检查更新（客户端用，不需要登录、不需要签名） */
 export async function checkUpdate(appId: string, currentVersion: string): Promise<CheckUpdateResult> {
   const res = await axios.post(`${BASE_URL}/client/version/check-update`, {
     app_id: appId,
@@ -32,9 +34,34 @@ export async function checkUpdate(appId: string, currentVersion: string): Promis
   return res.data?.data ?? res.data
 }
 
-/** 上传 EXE 安装包（管理员接口） */
+/** 获取下一个版本号（不需要 token） */
+export async function fetchNextVersion(appId: string): Promise<{ current: string; next: string }> {
+  const res = await axios.get(`${BASE_URL}/huayun/api/versions/next-version`, {
+    params: { app_id: appId },
+  })
+  return res.data?.data ?? res.data
+}
+
+/** 创建版本记录 */
+export async function createVersion(
+  token: string,
+  data: {
+    app_id: string
+    version: string
+    description?: string
+    force_update?: boolean
+  },
+): Promise<{ id: number }> {
+  const res = await axios.post(`${BASE_URL}/huayun/api/versions`, {
+    token,
+    ...data,
+  })
+  return res.data?.data ?? res.data
+}
+
+/** 上传 EXE 安装包 */
 export async function uploadExe(
-  adminToken: string,
+  token: string,
   appId: string,
   version: string,
   file: File,
@@ -43,13 +70,11 @@ export async function uploadExe(
   const form = new FormData()
   form.append('app_id', appId)
   form.append('version', version)
+  form.append('token', token)
   form.append('file', file)
 
   const res = await axios.post(`${BASE_URL}/huayun/api/versions/upload-exe`, form, {
-    headers: {
-      Authorization: `Bearer ${adminToken}`,
-      'Content-Type': 'multipart/form-data',
-    },
+    headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress(e) {
       if (e.total && onProgress) onProgress(Math.round((e.loaded / e.total) * 100))
     },
@@ -57,27 +82,25 @@ export async function uploadExe(
   return res.data?.data ?? res.data
 }
 
-/** 创建/发布版本（管理员接口） */
-export async function publishVersion(
-  adminToken: string,
+/** 编辑版本（更新下载地址等） */
+export async function updateVersion(
+  token: string,
+  versionId: number,
   data: {
-    app_id: string
-    version: string
+    download_url?: string
     description?: string
     force_update?: boolean
-    download_url?: string
   },
 ): Promise<void> {
-  await axios.post(`${BASE_URL}/huayun/api/versions/create`, data, {
-    headers: { Authorization: `Bearer ${adminToken}` },
+  await axios.put(`${BASE_URL}/huayun/api/versions/${versionId}`, {
+    token,
+    ...data,
   })
 }
 
-/** 获取版本列表（管理员接口） */
-export async function fetchVersions(adminToken: string, appId: string): Promise<UpdateVersion[]> {
-  const res = await axios.get(`${BASE_URL}/huayun/api/versions/list`, {
-    headers: { Authorization: `Bearer ${adminToken}` },
-    params: { app_id: appId },
+/** 删除版本 */
+export async function deleteVersion(token: string, versionId: number): Promise<void> {
+  await axios.delete(`${BASE_URL}/huayun/api/versions/${versionId}`, {
+    params: { token },
   })
-  return res.data?.data?.items ?? res.data?.data ?? []
 }

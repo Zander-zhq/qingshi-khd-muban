@@ -37,3 +37,32 @@ export function createOrder(token: string, appId: string, data: {
 export function queryOrder(token: string, orderNo: string) {
   return post<OrderStatus>('/client/pay/query-order', { token, order_no: orderNo })
 }
+
+/* ─── Guest（不登录）版在线支付 ─── */
+
+export interface GuestCreateOrderData {
+  acctno: string
+  card_group_id: number
+  payment_method: string
+  brand_id?: string
+}
+
+export interface GuestOrderStatus extends OrderStatus {
+  amount?: number
+  payment_method?: string
+  card_group_name?: string
+  vip_expire_at?: string
+  fen?: number
+}
+
+export function fetchGuestPackages(appId: string) {
+  return post<{ items: PayPackage[] }>(`/client/pay/guest/packages?app_id=${appId}`, {})
+}
+
+export function createGuestOrder(appId: string, data: GuestCreateOrderData) {
+  return post<CreateOrderResult>(`/client/pay/guest/create-order?app_id=${appId}`, data)
+}
+
+export function queryGuestOrder(orderNo: string) {
+  return post<GuestOrderStatus>('/client/pay/guest/query-order', { order_no: orderNo })
+}

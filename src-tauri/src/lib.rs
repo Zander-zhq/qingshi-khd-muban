@@ -333,7 +333,7 @@ fn start_brand_build(app: AppHandle, brand_name: String, product_name: String, l
     let _ = app.emit("build-status", "building");
 
     std::thread::spawn(move || {
-        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, true);
+        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, true, None);
 
         let payload = match result {
             Ok(path) => serde_json::json!({ "success": true, "output_path": path }),
@@ -430,7 +430,7 @@ fn create_ico_from_png(png_data: &[u8], ico_path: &PathBuf) -> Result<(), String
     fs::write(ico_path, ico).map_err(|e| format!("写入 ICO 失败: {}", e))
 }
 
-fn execute_build(app: &AppHandle, tauri_dir: &PathBuf, project_root: &PathBuf, brand_name: &str, product_name: &str, logo_data: &str, include_brand_config: bool) -> Result<String, String> {
+fn execute_build(app: &AppHandle, tauri_dir: &PathBuf, project_root: &PathBuf, brand_name: &str, product_name: &str, logo_data: &str, include_brand_config: bool, version: Option<&str>) -> Result<String, String> {
     let build_dir = project_root.join(".brand-build");
     fs::create_dir_all(&build_dir).map_err(|e| format!("创建构建目录失败: {}", e))?;
     let display_name = if product_name.is_empty() { brand_name } else { product_name };
@@ -518,7 +518,7 @@ FunctionEnd
         }
     }
 
-    let build_result = run_build_process(app, project_root, tauri_dir, &config_file_str);
+    let build_result = run_build_process(app, project_root, tauri_dir, &config_file_str, version);
 
     let final_result = match build_result {
         Ok(exe_path) => {
@@ -546,23 +546,32 @@ FunctionEnd
     final_result
 }
 
-fn run_build_process(app: &AppHandle, project_root: &PathBuf, tauri_dir: &PathBuf, config_file: &str) -> Result<String, String> {
+fn run_build_process(app: &AppHandle, project_root: &PathBuf, tauri_dir: &PathBuf, config_file: &str, version: Option<&str>) -> Result<String, String> {
     #[cfg(target_os = "windows")]
-    let mut child = std::process::Command::new("cmd")
-        .args(["/c", "npx", "tauri", "build", "--config", config_file])
-        .current_dir(project_root)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("启动构建失败: {}", e))?;
+    let mut cmd = std::process::Command::new("cmd");
+    #[cfg(target_os = "windows")]
+    cmd.args(["/c", "npx", "tauri", "build", "--config", config_file]);
 
     #[cfg(not(target_os = "windows"))]
-    let mut child = std::process::Command::new("npx")
-        .args(["tauri", "build", "--config", config_file])
-        .current_dir(project_root)
+    let mut cmd = std::process::Command::new("npx");
+    #[cfg(not(target_os = "windows"))]
+    cmd.args(["tauri", "build", "--config", config_file]);
+
+    cmd.current_dir(project_root)
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+
+    if let Some(v) = version {
+        let ver = if v.starts_with('V') || v.starts_with('v') {
+            v.to_string()
+        } else {
+            format!("V{}", v)
+        };
+        cmd.env("VITE_APP_VERSION", &ver);
+        let _ = app.emit("build-log", format!("设置构建版本号: {}", ver));
+    }
+
+    let mut child = cmd.spawn()
         .map_err(|e| format!("启动构建失败: {}", e))?;
 
     let app_out = app.clone();
@@ -612,6 +621,30 @@ fn run_build_process(app: &AppHandle, project_root: &PathBuf, tauri_dir: &PathBu
     Ok(bundle_dir.to_string_lossy().to_string())
 }
 
+/* ─── 写入版本号到 brand.ts ─── */
+
+#[tauri::command]
+fn update_version_in_source(app: AppHandle, version: String) -> Result<(), String> {
+    let tauri_dir = app.path().resolve("", tauri::path::BaseDirectory::Resource)
+        .map_err(|e| format!("获取目录失败: {}", e))?
+        .parent().unwrap().parent().unwrap().parent().unwrap()
+        .join("src-tauri");
+    let project_root = tauri_dir.parent().unwrap();
+    let src_dir = project_root.join("src").join("brand.ts");
+
+    let content = fs::read_to_string(&src_dir)
+        .map_err(|e| format!("读取 brand.ts 失败: {}", e))?;
+
+    let re = regex::Regex::new(r"export const VERSION = '[^']*'")
+        .map_err(|e| format!("正则编译失败: {}", e))?;
+    let new_content = re.replace(&content, format!("export const VERSION = 'V{}'", version).as_str());
+
+    fs::write(&src_dir, new_content.as_ref())
+        .map_err(|e| format!("写入 brand.ts 失败: {}", e))?;
+
+    Ok(())
+}
+
 /* ─── 版本打包（不含品牌配置） ─── */
 
 #[tauri::command]
@@ -620,6 +653,7 @@ async fn start_version_build(
     brand_name: String,
     product_name: String,
     logo_data: String,
+    version: String,
 ) -> Result<(), String> {
     if BUILD_RUNNING.load(Ordering::SeqCst) {
         return Err("已有构建任务在运行".into());
@@ -635,7 +669,8 @@ async fn start_version_build(
     let _ = app.emit("build-status", "building");
 
     std::thread::spawn(move || {
-        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, false);
+        let ver = if version.is_empty() { None } else { Some(version.as_str()) };
+        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, false, ver);
 
         let payload = match result {
             Ok(path) => serde_json::json!({ "success": true, "output_path": path }),
@@ -656,6 +691,13 @@ struct DownloadFileProgress {
     total: Option<u64>,
     percent: f64,
     file_path: String,
+}
+
+#[tauri::command]
+fn read_file_base64(path: String) -> Result<String, String> {
+    let clean = path.strip_prefix(r"\\?\").unwrap_or(&path);
+    let bytes = fs::read(clean).map_err(|e| format!("读取文件失败: {}", e))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 #[tauri::command]
@@ -760,6 +802,8 @@ pub fn run() {
             is_build_running,
             start_brand_build,
             start_version_build,
+            update_version_in_source,
+            read_file_base64,
             download_file_to_dir,
             get_download_dir,
             run_installer_and_exit

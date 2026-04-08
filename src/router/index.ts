@@ -45,7 +45,7 @@ const router = createRouter({
     { path: '/login', name: 'Login', component: m.login, meta: { title: `登录 - ${brand.brand_name}` } },
     { path: '/register', name: 'Register', component: m.register, meta: { title: `注册 - ${brand.brand_name}` } },
     { path: '/forgot-password', name: 'ForgotPassword', component: m.forgotPassword, meta: { title: `找回密码 - ${brand.brand_name}` } },
-    { path: '/recharge', name: 'Recharge', component: m.recharge, meta: { title: `卡密充值 - ${brand.brand_name}` } },
+    { path: '/recharge', name: 'Recharge', component: m.recharge, meta: { title: `充值中心 - ${brand.brand_name}` } },
     { path: '/unbind-device', name: 'UnbindDevice', component: m.unbindDevice, meta: { title: `解绑设备 - ${brand.brand_name}` } },
     {
       path: '/main',
