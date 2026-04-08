@@ -44,7 +44,7 @@ const richRef = ref<HTMLElement | null>(null)
 async function addVersion() {
   try {
     const { appId } = await getAppCredentials()
-    const res = await fetchNextVersion(appId)
+    const res = await fetchNextVersion(appId, userStore.token)
     editVersion.value = res.next
   } catch {
     const latest = versions.value.length > 0 ? versions.value[0].version : currentVersion

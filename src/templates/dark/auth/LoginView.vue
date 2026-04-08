@@ -8,7 +8,7 @@ import { useLogin, getAccountAvatarSrc, maskPhone } from '../../../composables/u
 
 const {
   router, cachedAvatar, acctno, password, rememberPwd, autoLogin, loading, errMsg,
-  autoLoginCountdown, savedAccounts, showDropdown,
+  autoLoginCountdown, savedAccounts,
   dropdownAccounts, shouldShowDropdown, buttonLabel,
   selectAccount, handleDeleteAccount, onAcctInput, onAcctFocus, onAcctBlur,
   onAcctAreaLeave, cancelAcctAreaLeave, toggleDropdown,

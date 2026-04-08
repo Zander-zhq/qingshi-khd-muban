@@ -36,10 +36,11 @@ export async function checkUpdate(appId: string, currentVersion: string): Promis
   return res.data?.data ?? res.data
 }
 
-/** 获取下一个版本号（不需要 token） */
-export async function fetchNextVersion(appId: string): Promise<{ current: string; next: string }> {
+/** 获取下一个版本号 */
+export async function fetchNextVersion(appId: string, token?: string): Promise<{ current: string; next: string }> {
   const res = await axios.get(`${BASE_URL}/huayun/api/versions/next-version`, {
     params: { app_id: appId },
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
   })
   return res.data?.data ?? res.data
 }

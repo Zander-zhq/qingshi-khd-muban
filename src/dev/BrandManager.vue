@@ -471,10 +471,23 @@ async function startBuild(b: BrandConfig) {
       }
     }
 
+    let latestVersion: string | undefined
+    try {
+      const { checkUpdate } = await import('../api/version')
+      const { getAppCredentials } = await import('../utils/config')
+      const { appId } = await getAppCredentials()
+      const res = await checkUpdate(appId, '0.0.0')
+      latestVersion = res.latest_version || undefined
+      if (latestVersion) buildLogs.value += `当前最新版本: V${latestVersion}\n`
+    } catch (e) {
+      buildLogs.value += `⚠ 获取版本号失败: ${e instanceof Error ? e.message : e}\n`
+    }
+
     await invoke('start_brand_build', {
       brandName: b.brand_name,
       productName: b.product_name || b.brand_name,
       logoData: logoData.startsWith('data:') ? logoData : '',
+      currentVersion: latestVersion || null,
     })
   } catch (e: unknown) {
     buildStatus.value = 'error'

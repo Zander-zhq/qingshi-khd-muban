@@ -97,7 +97,7 @@ onMounted(() => {
   if (userStore.token) {
     startHeartbeat(userStore.token)
   }
-  checkForUpdate()
+  if (!import.meta.env.DEV) checkForUpdate()
   document.addEventListener('click', closeUserMenu)
 
   function countdownLogout(seconds: number) {

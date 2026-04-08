@@ -326,7 +326,7 @@ async function onLogout() {
 
 onMounted(() => {
   initHeartbeat()
-  checkForUpdate()
+  if (!import.meta.env.DEV) checkForUpdate()
   document.addEventListener('click', closeUserMenu)
 
   const info = userStore.userInfo

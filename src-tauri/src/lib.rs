@@ -308,7 +308,7 @@ fn is_build_running() -> bool {
 }
 
 #[tauri::command]
-fn start_brand_build(app: AppHandle, brand_name: String, product_name: String, logo_data: String) -> Result<(), String> {
+fn start_brand_build(app: AppHandle, brand_name: String, product_name: String, logo_data: String, current_version: Option<String>) -> Result<(), String> {
     if BUILD_RUNNING.load(Ordering::SeqCst) {
         return Err("已有构建任务正在运行".to_string());
     }
@@ -333,7 +333,8 @@ fn start_brand_build(app: AppHandle, brand_name: String, product_name: String, l
     let _ = app.emit("build-status", "building");
 
     std::thread::spawn(move || {
-        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, true, None);
+        let ver_ref = current_version.as_deref();
+        let result = execute_build(&app, &tauri_dir, &project_root, &brand_name, &product_name, &logo_data, true, ver_ref);
 
         let payload = match result {
             Ok(path) => serde_json::json!({ "success": true, "output_path": path }),
@@ -471,7 +472,22 @@ FunctionEnd
         });
     }
 
-    if !logo_data.is_empty() {
+    if !include_brand_config {
+        let update_icon_png = tauri_dir.join("icons").join("update-icon.png");
+        if update_icon_png.exists() {
+            let ico_path = build_dir.join("update-icon.ico");
+            if let Ok(png_bytes) = fs::read(&update_icon_png) {
+                if create_ico_from_png(&png_bytes, &ico_path).is_ok() {
+                    config_override["bundle"]["icon"] = serde_json::json!([
+                        "../src-tauri/icons/update-icon.png",
+                        "../.brand-build/update-icon.ico"
+                    ]);
+                    config_override["bundle"]["windows"]["nsis"]["installerIcon"] = serde_json::json!("../.brand-build/update-icon.ico");
+                    let _ = app.emit("build-log", "使用通用更新图标");
+                }
+            }
+        }
+    } else if !logo_data.is_empty() {
         if let Ok(png_bytes) = decode_data_uri(logo_data) {
             let png_path = build_dir.join("brand-icon.png");
             let ico_path = build_dir.join("brand-icon.ico");
@@ -525,13 +541,23 @@ FunctionEnd
             let _ = fs::create_dir_all(&output_dir);
             let src = PathBuf::from(&exe_path);
             if src.exists() {
-                if let Some(filename) = src.file_name() {
-                    let dest = output_dir.join(filename);
-                    fs::copy(&src, &dest)
-                        .map_err(|e| format!("复制安装包到 output 目录失败: {}", e))?;
-                    let _ = app.emit("build-log", format!("已复制到: {}", dest.to_string_lossy()));
-                    Ok(dest.to_string_lossy().to_string())
-                } else { Ok(exe_path) }
+                let out_filename = if let Some(ver) = version {
+                    let v = if ver.starts_with('V') || ver.starts_with('v') {
+                        ver.to_string()
+                    } else {
+                        format!("V{}", ver)
+                    };
+                    format!("{}_{}.exe", display_name, v)
+                } else if let Some(f) = src.file_name() {
+                    f.to_string_lossy().to_string()
+                } else {
+                    return Ok(exe_path);
+                };
+                let dest = output_dir.join(&out_filename);
+                fs::copy(&src, &dest)
+                    .map_err(|e| format!("复制安装包到 output 目录失败: {}", e))?;
+                let _ = app.emit("build-log", format!("已复制到: {}", dest.to_string_lossy()));
+                Ok(dest.to_string_lossy().to_string())
             } else { Ok(exe_path) }
         }
         Err(e) => Err(e),
