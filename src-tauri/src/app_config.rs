@@ -5,7 +5,7 @@
 // └─────────────────────────────────────────────────────┘
 
 /// 产品 ID（服务端分配，每个产品不同）
-pub const APP_ID: &str = "1002";
+pub const APP_ID: &str = "1001";
 
 /// 产品密钥（服务端分配，用于签名和加密）
-pub const APP_KEY: &str = "9b3292c63a464200b507fca8d6af5299";
+pub const APP_KEY: &str = "7a5602f97fddbd9e0eda45c32b163ae8";
