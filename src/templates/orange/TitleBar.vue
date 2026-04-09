@@ -14,7 +14,7 @@ defineProps<{
   contactFloatVisible?: boolean
 }>()
 
-const emit = defineEmits<{ 'restore-contact': [] }>()
+const emit = defineEmits<{ 'restore-contact': []; 'open-disclaimer': [] }>()
 
 const brand = getBrand()
 const brandLogo = getBrandLogo()
@@ -138,6 +138,7 @@ async function onExit() { showMenu.value = false; await exitApp() }
           <div class="app-menu-divider" />
           <button v-if="brand.website" class="app-menu-item" @click="onWebsite"><i class="pi pi-globe"></i> 访问官网</button>
           <button v-if="brand.contact_images?.length && !contactFloatVisible" class="app-menu-item" @click="showMenu = false; emit('restore-contact')"><i class="pi pi-comments"></i> 联系我们</button>
+          <button v-if="brand.disclaimer" class="app-menu-item" @click="showMenu = false; emit('open-disclaimer')"><i class="pi pi-shield"></i> 免责声明</button>
           <button v-if="brand.about" class="app-menu-item" @click="onAbout"><i class="pi pi-info-circle"></i> 关于</button>
           <button class="app-menu-item app-menu-item--danger" @click="onExit"><i class="pi pi-sign-out"></i> 退出程序</button>
         </div>

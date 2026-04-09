@@ -310,18 +310,25 @@ let syncing = false
 async function doSyncBrand(): Promise<boolean> {
   let localVersion = 0
   let localBrandId: string | undefined
+  let localJson: string | null = null
 
-  const localJson = await invoke<string | null>('read_brand_config')
+  try {
+    localJson = await invoke<string | null>('read_brand_config')
+  } catch {
+    logger.warn('brand', '本地品牌配置解密失败（密钥变更或文件损坏），将从服务器重新获取')
+  }
+
   if (localJson) {
     try {
       const local = JSON.parse(localJson) as ServerBrand
       localVersion = local.data_version ?? 0
       localBrandId = local.brand_id
-    } catch { /* 本地配置损坏，当作首次 */ }
+    } catch { /* JSON 解析失败，当作首次同步 */ }
   }
 
   const { syncBrandConfig } = await import('./api/brand')
-  const res = await syncBrandConfig(localBrandId || getActiveBrandId(), localVersion)
+  const activeBrandId = localBrandId || getActiveBrandId()
+  const res = await syncBrandConfig(activeBrandId === 'default' ? undefined : activeBrandId, localVersion)
 
   if (res.updated && res.config) {
     await invoke('save_brand_config', { encryptedBase64: res.config })

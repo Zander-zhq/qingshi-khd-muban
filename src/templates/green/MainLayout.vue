@@ -13,6 +13,7 @@ import { showDialog } from '../../utils/dialog'
 import { updateProfileApi, sendEmailCodeApi, bindEmailApi, changePasswordApi, redeemCardInnerApi, unbindDeviceInnerApi } from '../../api/auth'
 import { uploadImage } from '../../api/brand'
 import { getBrand } from '../../brand'
+import appRoutes from '../../app/routes'
 import { fetchPackages, createOrder, queryOrder } from '../../api/pay'
 import type { PayPackage } from '../../api/pay'
 import QRCode from 'qrcode'
@@ -43,7 +44,7 @@ const {
 } = useCheckin()
 
 const {
-  showDisclaimerModal, hasDisclaimer, openDisclaimer, closeDisclaimer,
+  showDisclaimerModal, openDisclaimer, closeDisclaimer,
   acceptDisclaimer, checkAndShowOnFirstLogin,
 } = useDisclaimer()
 
@@ -63,14 +64,20 @@ async function handleCheckin() {
 }
 
 const displayName = computed(() => userStore.userInfo?.username || '用户')
+const appMenuItems = appRoutes
+  .filter(r => r.meta?.menuItem)
+  .sort((a, b) => ((a.meta!.menuItem as any).order ?? 99) - ((b.meta!.menuItem as any).order ?? 99))
+  .map(r => {
+    const mi = r.meta!.menuItem as { label: string; icon: string }
+    return { label: mi.label, icon: mi.icon, path: `/main/${String(r.path)}` }
+  })
+
 const menuItems = [
   { label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },
+  ...appMenuItems,
   ...(import.meta.env.DEV ? [
     { label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' },
     { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },
-  ] : []),
-  ...(hasDisclaimer.value ? [
-    { label: '免责声明', icon: 'pi pi-shield', path: '#disclaimer' },
   ] : []),
 ]
 
@@ -597,7 +604,7 @@ async function submitUnbind() {
 
 <template>
   <div class="layout-root">
-    <TitleBar variant="full" :title="pageTitle" :contact-float-visible="showContactFloat" @restore-contact="restoreContactFloat" />
+    <TitleBar variant="full" :title="pageTitle" :contact-float-visible="showContactFloat" @restore-contact="restoreContactFloat" @open-disclaimer="openDisclaimer" />
 
     <div class="layout-body">
       <aside class="sidebar" :class="{ 'sidebar--collapsed': collapsed }">

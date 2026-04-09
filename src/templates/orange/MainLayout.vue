@@ -15,6 +15,7 @@ import QRCode from 'qrcode'
 import { redeemCardInnerApi } from '../../api/auth'
 import { startHeartbeat } from '../../utils/heartbeat'
 import { getBrand, getBrandLogo } from '../../brand'
+import appRoutes from '../../app/routes'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { useContact } from '../../composables/useContact'
 import { useVersionUpdate } from '../../composables/useVersionUpdate'
@@ -41,7 +42,7 @@ const {
 } = useCheckin()
 
 const {
-  showDisclaimerModal, hasDisclaimer, openDisclaimer, closeDisclaimer,
+  showDisclaimerModal, openDisclaimer, closeDisclaimer,
   acceptDisclaimer, checkAndShowOnFirstLogin,
 } = useDisclaimer()
 
@@ -242,8 +243,17 @@ function closeQrModal() {
 interface SubItem { label: string; icon?: string; path: string }
 interface MenuItem { label: string; icon: string; path?: string; children?: SubItem[] }
 
+const appMenuItems: MenuItem[] = appRoutes
+  .filter(r => r.meta?.menuItem)
+  .sort((a, b) => ((a.meta!.menuItem as any).order ?? 99) - ((b.meta!.menuItem as any).order ?? 99))
+  .map(r => {
+    const mi = r.meta!.menuItem as { label: string; icon: string }
+    return { label: mi.label, icon: mi.icon, path: `/main/${String(r.path)}` }
+  })
+
 const menuItems: MenuItem[] = [
   { label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },
+  ...appMenuItems,
   ...(import.meta.env.DEV ? [{
     label: '开发工具', icon: 'pi pi-wrench',
     children: [
@@ -251,9 +261,6 @@ const menuItems: MenuItem[] = [
       { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },
     ],
   }] as MenuItem[] : []),
-  ...(hasDisclaimer.value ? [
-    { label: '免责声明', icon: 'pi pi-shield', path: '#disclaimer' },
-  ] as MenuItem[] : []),
 ]
 
 const expandedGroup = ref<string | null>(null)
@@ -358,7 +365,7 @@ onUnmounted(() => {
 
 <template>
   <div class="layout-root">
-    <TitleBar variant="full" :title="pageTitle" :contact-float-visible="showContactFloat" @restore-contact="restoreContactFloat" />
+    <TitleBar variant="full" :title="pageTitle" :contact-float-visible="showContactFloat" @restore-contact="restoreContactFloat" @open-disclaimer="openDisclaimer" />
 
     <div class="layout-body">
       <!-- Icon Rail -->
