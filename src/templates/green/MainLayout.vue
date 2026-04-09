@@ -19,6 +19,8 @@ import QRCode from 'qrcode'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { useContact } from '../../composables/useContact'
 import { useVersionUpdate } from '../../composables/useVersionUpdate'
+import { useDisclaimer } from '../../composables/useDisclaimer'
+import DisclaimerDialog from '../../components/DisclaimerDialog.vue'
 import { getAppCredentials, getUnbindTip } from '../../utils/config'
 
 const route = useRoute()
@@ -39,6 +41,11 @@ const {
 const {
   checkinLoading, canCheckin, rewardSummary, showCheckinHint, doCheckin, clearCheckin,
 } = useCheckin()
+
+const {
+  showDisclaimerModal, hasDisclaimer, openDisclaimer, closeDisclaimer,
+  acceptDisclaimer, checkAndShowOnFirstLogin,
+} = useDisclaimer()
 
 const checkinMsg = ref('')
 
@@ -61,6 +68,9 @@ const menuItems = [
   ...(import.meta.env.DEV ? [
     { label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' },
     { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },
+  ] : []),
+  ...(hasDisclaimer.value ? [
+    { label: '免责声明', icon: 'pi pi-shield', path: '#disclaimer' },
   ] : []),
 ]
 
@@ -147,6 +157,8 @@ onMounted(() => {
   if (info && (!info.acctno || !info.email)) {
     setTimeout(() => handleEditProfile(), 500)
   }
+
+  setTimeout(() => checkAndShowOnFirstLogin(), 800)
 })
 
 onUnmounted(() => {
@@ -155,6 +167,10 @@ onUnmounted(() => {
 })
 
 async function handleNavigate(path: string) {
+  if (path === '#disclaimer') {
+    openDisclaimer()
+    return
+  }
   logger.log('main-layout', '点击菜单导航', { path })
   await router.push(path)
 }
@@ -1074,6 +1090,14 @@ async function submitUnbind() {
         </div>
       </div>
     </Transition>
+
+    <!-- 免责声明弹窗 -->
+    <DisclaimerDialog
+      :visible="showDisclaimerModal"
+      :show-accept-button="true"
+      @close="closeDisclaimer"
+      @accept="acceptDisclaimer"
+    />
   </div>
 </template>
 

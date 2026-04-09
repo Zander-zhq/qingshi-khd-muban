@@ -51,6 +51,7 @@ export interface ServerBrand {
   checkin_reward_value?: number
   pay_channel?: string
   pay_methods?: string[]
+  disclaimer?: string
 }
 
 /* ─── 品牌 CRUD ─── */
@@ -83,6 +84,7 @@ export async function createBrand(token: string, data: {
   checkin_reward_value?: number
   pay_channel?: string
   pay_methods?: string[]
+  disclaimer?: string
 }): Promise<{ id: number; brand_id: string }> {
   const { appId } = await getAppCredentials()
   return post<{ id: number; brand_id: string }>('/client/brands/create', {

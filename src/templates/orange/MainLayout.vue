@@ -19,6 +19,8 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import { useContact } from '../../composables/useContact'
 import { useVersionUpdate } from '../../composables/useVersionUpdate'
 import { useCheckin } from '../../composables/useCheckin'
+import { useDisclaimer } from '../../composables/useDisclaimer'
+import DisclaimerDialog from '../../components/DisclaimerDialog.vue'
 
 const brand = getBrand()
 const brandLogo = getBrandLogo()
@@ -37,6 +39,11 @@ const {
 const {
   checkinLoading, canCheckin, rewardSummary, showCheckinHint, doCheckin, clearCheckin,
 } = useCheckin()
+
+const {
+  showDisclaimerModal, hasDisclaimer, openDisclaimer, closeDisclaimer,
+  acceptDisclaimer, checkAndShowOnFirstLogin,
+} = useDisclaimer()
 
 const checkinMsg = ref('')
 
@@ -244,6 +251,9 @@ const menuItems: MenuItem[] = [
       { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },
     ],
   }] as MenuItem[] : []),
+  ...(hasDisclaimer.value ? [
+    { label: '免责声明', icon: 'pi pi-shield', path: '#disclaimer' },
+  ] as MenuItem[] : []),
 ]
 
 const expandedGroup = ref<string | null>(null)
@@ -283,6 +293,8 @@ function closeUserMenu() {
 function handleMenuClick(item: MenuItem) {
   if (item.children) {
     expandedGroup.value = expandedGroup.value === item.label ? null : item.label
+  } else if (item.path === '#disclaimer') {
+    openDisclaimer()
   } else if (item.path) {
     expandedGroup.value = null
     _router.push(item.path)
@@ -333,6 +345,8 @@ onMounted(() => {
   if (info && (!info.acctno || !info.email)) {
     setTimeout(() => handleEditProfile(), 500)
   }
+
+  setTimeout(() => checkAndShowOnFirstLogin(), 800)
 })
 
 onUnmounted(() => {
@@ -770,6 +784,14 @@ onUnmounted(() => {
         </div>
       </div>
     </Transition>
+
+    <!-- 免责声明弹窗 -->
+    <DisclaimerDialog
+      :visible="showDisclaimerModal"
+      :show-accept-button="true"
+      @close="closeDisclaimer"
+      @accept="acceptDisclaimer"
+    />
   </div>
 </template>
 

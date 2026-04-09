@@ -28,6 +28,7 @@ export interface BrandConfig {
   checkin_reward_value: number
   pay_channel: 'none' | 'enterprise' | 'hupijiao'
   pay_methods: string[]
+  disclaimer: string
 }
 
 const DEFAULT_BRAND: BrandConfig = {
@@ -51,6 +52,7 @@ const DEFAULT_BRAND: BrandConfig = {
   checkin_reward_value: 0,
   pay_channel: 'none',
   pay_methods: [],
+  disclaimer: '',
 }
 
 const VALID_TEMPLATES = ['green', 'orange', 'dark'] as const
@@ -93,6 +95,7 @@ export function serverBrandToConfig(s: ServerBrand): BrandConfig {
     checkin_reward_value: coerceBrandRewardValue(s.checkin_reward_value),
     pay_channel: (['none', 'enterprise', 'hupijiao'].includes(s.pay_channel || '') ? s.pay_channel : 'none') as BrandConfig['pay_channel'],
     pay_methods: Array.isArray(s.pay_methods) ? s.pay_methods : [],
+    disclaimer: s.disclaimer || '',
   }
 }
 

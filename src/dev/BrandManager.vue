@@ -100,6 +100,58 @@ function rewardPayload(b: BrandConfig) {
   }
 }
 
+/* ─── 奖励单位切换 ─── */
+
+const REWARD_UNITS = [
+  { id: 'day', label: '天', factor: 86400 },
+  { id: 'hour', label: '小时', factor: 3600 },
+  { id: 'minute', label: '分钟', factor: 60 },
+  { id: 'second', label: '秒', factor: 1 },
+]
+
+type RewardField = 'reg' | 'invitee' | 'inviter' | 'checkin'
+
+const REWARD_VALUE_KEY: Record<RewardField, 'reg_reward_value' | 'invite_invitee_reward_value' | 'invite_inviter_reward_value' | 'checkin_reward_value'> = {
+  reg: 'reg_reward_value',
+  invitee: 'invite_invitee_reward_value',
+  inviter: 'invite_inviter_reward_value',
+  checkin: 'checkin_reward_value',
+}
+
+const rewardUnits = ref<Record<RewardField, string>>({
+  reg: 'day', invitee: 'day', inviter: 'day', checkin: 'day',
+})
+
+function unitFactor(unit: string): number {
+  return REWARD_UNITS.find(u => u.id === unit)?.factor || 1
+}
+
+function detectBestUnit(seconds: number): string {
+  if (seconds > 0 && seconds % 86400 === 0) return 'day'
+  if (seconds > 0 && seconds % 3600 === 0) return 'hour'
+  if (seconds > 0 && seconds % 60 === 0) return 'minute'
+  return seconds === 0 ? 'day' : 'second'
+}
+
+function getRewardDisplay(field: RewardField): number {
+  if (!editingBrand.value) return 0
+  const seconds = editingBrand.value[REWARD_VALUE_KEY[field]]
+  return Math.round(seconds / unitFactor(rewardUnits.value[field]))
+}
+
+function onRewardInput(field: RewardField, event: Event) {
+  if (!editingBrand.value) return
+  const val = +(event.target as HTMLInputElement).value || 0
+  editingBrand.value[REWARD_VALUE_KEY[field]] = Math.round(val * unitFactor(rewardUnits.value[field]))
+}
+
+function initRewardUnits() {
+  if (!editingBrand.value) return
+  for (const [field, key] of Object.entries(REWARD_VALUE_KEY)) {
+    rewardUnits.value[field as RewardField] = detectBestUnit(editingBrand.value[key])
+  }
+}
+
 function togglePayMethod(method: string) {
   if (!editingBrand.value) return
   const list = editingBrand.value.pay_methods
@@ -132,13 +184,16 @@ function addBrand() {
     checkin_reward_value: 0,
     pay_channel: 'none',
     pay_methods: [],
+    disclaimer: '',
   }
+  initRewardUnits()
   resetPending()
   showEditor.value = true
 }
 
 function editBrand(b: BrandConfig) {
   editingBrand.value = { ...b, contact_images: [...(b.contact_images || [])], pay_methods: [...(b.pay_methods || [])] }
+  initRewardUnits()
   resetPending()
   showEditor.value = true
 }
@@ -200,6 +255,7 @@ async function saveCurrent() {
         tutorial_url: b.tutorial_url,
         pay_channel: b.pay_channel,
         pay_methods: b.pay_methods,
+        disclaimer: b.disclaimer,
         ...rewardPayload(b),
       })
       brandId = res.brand_id
@@ -231,6 +287,7 @@ async function saveCurrent() {
         contact_images: b.contact_images,
         pay_channel: b.pay_channel,
         pay_methods: b.pay_methods,
+        disclaimer: b.disclaimer,
         ...rewardPayload(b),
       })
     } else if (b.logo || b.contact_images.length) {
@@ -601,6 +658,11 @@ onUnmounted(() => {
             </div>
 
             <div class="bm-field">
+              <label>免责声明</label>
+              <textarea v-model="editingBrand.disclaimer" placeholder="选填，为空则不显示" rows="3" class="bm-textarea"></textarea>
+            </div>
+
+            <div class="bm-field">
               <label>Logo</label>
               <div class="bm-logo-area">
                 <div v-if="currentLogoSrc()" class="bm-logo-preview">
@@ -663,7 +725,7 @@ onUnmounted(() => {
             <div class="bm-reward-section">
               <div class="bm-reward-title">奖励控制</div>
               <p class="bm-reward-hint">
-                会员奖励单位为秒（86400 秒 = 1 天），积分奖励填写数值。设为 0 表示不发放该项奖励。
+                会员奖励可选择时间单位（天/小时/分钟/秒），积分奖励直接填写数量。设为 0 表示不发放该项奖励。
               </p>
               <div class="bm-reward-row">
                 <span class="bm-reward-label">注册奖励</span>
@@ -672,8 +734,16 @@ onUnmounted(() => {
                   <option value="points">积分</option>
                 </select>
                 <div class="bm-reward-value-cell">
-                  <input v-model.number="editingBrand.reg_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
-                  <span class="bm-reward-unit">{{ editingBrand.reg_reward_type === 'membership' ? '秒' : '积分' }}</span>
+                  <template v-if="editingBrand.reg_reward_type === 'membership'">
+                    <input :value="getRewardDisplay('reg')" @input="onRewardInput('reg', $event)" type="number" min="0" step="1" class="bm-reward-num" />
+                    <select v-model="rewardUnits.reg" class="bm-reward-unit-select">
+                      <option v-for="u in REWARD_UNITS" :key="u.id" :value="u.id">{{ u.label }}</option>
+                    </select>
+                  </template>
+                  <template v-else>
+                    <input v-model.number="editingBrand.reg_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
+                    <span class="bm-reward-unit">积分</span>
+                  </template>
                 </div>
               </div>
               <div class="bm-reward-row">
@@ -683,8 +753,16 @@ onUnmounted(() => {
                   <option value="points">积分</option>
                 </select>
                 <div class="bm-reward-value-cell">
-                  <input v-model.number="editingBrand.invite_invitee_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
-                  <span class="bm-reward-unit">{{ editingBrand.invite_invitee_reward_type === 'membership' ? '秒' : '积分' }}</span>
+                  <template v-if="editingBrand.invite_invitee_reward_type === 'membership'">
+                    <input :value="getRewardDisplay('invitee')" @input="onRewardInput('invitee', $event)" type="number" min="0" step="1" class="bm-reward-num" />
+                    <select v-model="rewardUnits.invitee" class="bm-reward-unit-select">
+                      <option v-for="u in REWARD_UNITS" :key="u.id" :value="u.id">{{ u.label }}</option>
+                    </select>
+                  </template>
+                  <template v-else>
+                    <input v-model.number="editingBrand.invite_invitee_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
+                    <span class="bm-reward-unit">积分</span>
+                  </template>
                 </div>
               </div>
               <div class="bm-reward-row">
@@ -694,8 +772,16 @@ onUnmounted(() => {
                   <option value="points">积分</option>
                 </select>
                 <div class="bm-reward-value-cell">
-                  <input v-model.number="editingBrand.invite_inviter_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
-                  <span class="bm-reward-unit">{{ editingBrand.invite_inviter_reward_type === 'membership' ? '秒' : '积分' }}</span>
+                  <template v-if="editingBrand.invite_inviter_reward_type === 'membership'">
+                    <input :value="getRewardDisplay('inviter')" @input="onRewardInput('inviter', $event)" type="number" min="0" step="1" class="bm-reward-num" />
+                    <select v-model="rewardUnits.inviter" class="bm-reward-unit-select">
+                      <option v-for="u in REWARD_UNITS" :key="u.id" :value="u.id">{{ u.label }}</option>
+                    </select>
+                  </template>
+                  <template v-else>
+                    <input v-model.number="editingBrand.invite_inviter_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
+                    <span class="bm-reward-unit">积分</span>
+                  </template>
                 </div>
               </div>
               <div class="bm-reward-row">
@@ -705,8 +791,16 @@ onUnmounted(() => {
                   <option value="points">积分</option>
                 </select>
                 <div class="bm-reward-value-cell">
-                  <input v-model.number="editingBrand.checkin_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
-                  <span class="bm-reward-unit">{{ editingBrand.checkin_reward_type === 'membership' ? '秒' : '积分' }}</span>
+                  <template v-if="editingBrand.checkin_reward_type === 'membership'">
+                    <input :value="getRewardDisplay('checkin')" @input="onRewardInput('checkin', $event)" type="number" min="0" step="1" class="bm-reward-num" />
+                    <select v-model="rewardUnits.checkin" class="bm-reward-unit-select">
+                      <option v-for="u in REWARD_UNITS" :key="u.id" :value="u.id">{{ u.label }}</option>
+                    </select>
+                  </template>
+                  <template v-else>
+                    <input v-model.number="editingBrand.checkin_reward_value" type="number" min="0" step="1" class="bm-reward-num" />
+                    <span class="bm-reward-unit">积分</span>
+                  </template>
                 </div>
               </div>
             </div>
@@ -935,8 +1029,13 @@ onUnmounted(() => {
   padding: 0 10px; font-size: 0.82rem; font-family: inherit;
   transition: border-color 0.15s; background: #fff;
 }
-.bm-field input:focus, .bm-field select:focus { outline: none; border-color: var(--app-primary); }
+.bm-field input:focus, .bm-field select:focus, .bm-textarea:focus { outline: none; border-color: var(--app-primary); }
 .bm-readonly { font-size: 0.78rem; color: #94a3b8; padding: 6px 0; font-family: monospace; }
+.bm-textarea {
+  border: 1.5px solid #e2e8f0; border-radius: 8px;
+  padding: 8px 10px; font-size: 0.82rem; font-family: inherit;
+  resize: vertical; min-height: 60px; transition: border-color 0.15s; background: #fff;
+}
 
 .bm-row { display: flex; gap: 12px; }
 
@@ -1016,6 +1115,19 @@ onUnmounted(() => {
   white-space: nowrap;
   flex-shrink: 0;
 }
+.bm-reward-unit-select {
+  height: 34px;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 0.78rem;
+  font-family: inherit;
+  background: #fff;
+  flex-shrink: 0;
+  min-width: 64px;
+  cursor: pointer;
+}
+.bm-reward-unit-select:focus { outline: none; border-color: var(--app-primary); }
 
 /* Logo Upload */
 .bm-logo-area { display: flex; align-items: center; gap: 12px; }
@@ -1103,9 +1215,11 @@ onUnmounted(() => {
 
 .bm-dark .bm-field label { color: #94A3B8; }
 .bm-dark .bm-field input,
-.bm-dark .bm-field select { background: #0F172A; border-color: #334155; color: #E2E8F0; }
+.bm-dark .bm-field select,
+.bm-dark .bm-textarea { background: #0F172A; border-color: #334155; color: #E2E8F0; }
 .bm-dark .bm-field input:focus,
-.bm-dark .bm-field select:focus { border-color: var(--app-primary); }
+.bm-dark .bm-field select:focus,
+.bm-dark .bm-textarea:focus { border-color: var(--app-primary); }
 .bm-dark .bm-readonly { color: #64748B; }
 
 .bm-dark .bm-reward-section { background: #0F172A; border-color: #334155; }
@@ -1113,7 +1227,8 @@ onUnmounted(() => {
 .bm-dark .bm-reward-hint { color: #64748B; }
 .bm-dark .bm-reward-label { color: #94A3B8; }
 .bm-dark .bm-reward-select,
-.bm-dark .bm-reward-num { background: #0F172A; border-color: #334155; color: #E2E8F0; }
+.bm-dark .bm-reward-num,
+.bm-dark .bm-reward-unit-select { background: #0F172A; border-color: #334155; color: #E2E8F0; }
 .bm-dark .bm-reward-unit { color: #64748B; }
 
 .bm-dark .bm-logo-preview { border-color: #334155; }
