@@ -453,7 +453,11 @@ onUnmounted(() => {
           </div>
         </header>
         <main class="content-area">
-          <RouterView />
+          <RouterView v-slot="{ Component }">
+            <KeepAlive>
+              <component :is="Component" />
+            </KeepAlive>
+          </RouterView>
         </main>
 
       </div>

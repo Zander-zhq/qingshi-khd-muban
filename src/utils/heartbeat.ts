@@ -4,8 +4,10 @@ import { getDeviceId } from './device'
 import { logger } from './logger'
 
 const HEARTBEAT_INTERVAL = 60_000
+const MAX_CONSECUTIVE_FAILURES = 3
 
 let timer: ReturnType<typeof setInterval> | null = null
+let consecutiveFailures = 0
 
 export interface HeartbeatCallbacks {
   onBanned?: (msg: string) => void
@@ -13,6 +15,7 @@ export interface HeartbeatCallbacks {
   onSessionExpired?: (msg: string) => void
   onDeviceMismatch?: (msg: string) => void
   onDeviceKicked?: (msg: string) => void
+  onServerUnreachable?: (msg: string) => void
 }
 
 let callbacks: HeartbeatCallbacks = {}
@@ -25,6 +28,7 @@ async function sendHeartbeat(token: string) {
   try {
     const [{ appId }, deviceId] = await Promise.all([getAppCredentials(), getDeviceId()])
     await userHeartbeatApi({ app_id: appId, token, device_id: deviceId })
+    consecutiveFailures = 0
     logger.log('heartbeat', '心跳发送成功')
   } catch (err) {
     const code = (err as any)?.code as number | undefined
@@ -46,12 +50,22 @@ async function sendHeartbeat(token: string) {
     } else if (code === -1 && msg.includes('设备')) {
       stopHeartbeat()
       callbacks.onDeviceMismatch?.(msg)
+    } else {
+      consecutiveFailures++
+      logger.warn('heartbeat', `连续失败 ${consecutiveFailures}/${MAX_CONSECUTIVE_FAILURES}`, { code, message: msg })
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+        stopHeartbeat()
+        callbacks.onServerUnreachable?.(
+          `无法连接到服务器（已连续 ${consecutiveFailures} 次失败），请检查网络后重新登录`
+        )
+      }
     }
   }
 }
 
 export function startHeartbeat(token: string) {
   stopHeartbeat()
+  consecutiveFailures = 0
   logger.log('heartbeat', '启动心跳', { interval: HEARTBEAT_INTERVAL })
   sendHeartbeat(token)
   timer = setInterval(() => sendHeartbeat(token), HEARTBEAT_INTERVAL)

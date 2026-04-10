@@ -19,6 +19,7 @@ const {
 <template>
   <div class="window-shell">
     <TitleBar variant="auth" />
+    <div class="scroll-body">
     <div class="login-bg">
       <div class="glow"></div>
       <div class="login-card">
@@ -149,6 +150,7 @@ const {
 
       </div>
     </div>
+    </div>
   </div>
 </template>
 
@@ -173,9 +175,20 @@ const {
   width: 100vw;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
   font-family: "Inter", "SF Pro Display", "PingFang SC", system-ui, sans-serif;
   background: #0A0F1E;
+}
+
+.window-shell :deep(.app-titlebar) {
+  flex-shrink: 0;
+}
+
+.scroll-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .login-bg {

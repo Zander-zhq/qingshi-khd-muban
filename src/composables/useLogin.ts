@@ -1,6 +1,6 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { userLoginApi } from '../api/auth'
+import { userLoginApi, userHeartbeatApi } from '../api/auth'
 import { useUserStore, toFullUrl } from '../stores/user'
 import { useCheckin } from './useCheckin'
 import { getBrand } from '../brand'
@@ -21,6 +21,28 @@ export interface SavedAccount {
 }
 
 const ACCOUNTS_KEY = 'saved_accounts'
+const OBFUSCATE_PREFIX = 'enc:'
+
+function obfuscate(plain: string): string {
+  const key = ACCOUNTS_KEY
+  const bytes = new TextEncoder().encode(plain)
+  const out = new Uint8Array(bytes.length)
+  for (let i = 0; i < bytes.length; i++) {
+    out[i] = bytes[i] ^ key.charCodeAt(i % key.length)
+  }
+  return OBFUSCATE_PREFIX + btoa(String.fromCharCode(...out))
+}
+
+function deobfuscate(encoded: string): string {
+  if (!encoded.startsWith(OBFUSCATE_PREFIX)) return encoded
+  const key = ACCOUNTS_KEY
+  const raw = atob(encoded.slice(OBFUSCATE_PREFIX.length))
+  const bytes = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) {
+    bytes[i] = raw.charCodeAt(i) ^ key.charCodeAt(i % key.length)
+  }
+  return new TextDecoder().decode(bytes)
+}
 
 export function getAccountAvatar(acctno: string): string {
   return appStorage.getItem(`avatar_${acctno}`) || ''
@@ -40,11 +62,11 @@ function loadSavedAccounts(): SavedAccount[] {
     const raw = appStorage.getItem(ACCOUNTS_KEY)
     if (!raw) return []
     const list = JSON.parse(raw) as (SavedAccount & { avatar?: string })[]
-    return list.map(({ avatar, ...rest }) => {
+    return list.map(({ avatar, password, ...rest }) => {
       if (avatar) {
         try { appStorage.setItem(`avatar_${rest.acctno}`, avatar) } catch { /* migrate */ }
       }
-      return rest
+      return { ...rest, password: deobfuscate(password) }
     })
   } catch {
     return []
@@ -52,7 +74,9 @@ function loadSavedAccounts(): SavedAccount[] {
 }
 
 function persistAccounts(accounts: SavedAccount[]) {
-  const clean = accounts.map(({ acctno, password, username, phone, altAcctno, avatarPath }) => ({ acctno, password, username, phone, altAcctno, avatarPath }))
+  const clean = accounts.map(({ acctno, password, username, phone, altAcctno, avatarPath }) => ({
+    acctno, password: obfuscate(password), username, phone, altAcctno, avatarPath,
+  }))
   appStorage.setItem(ACCOUNTS_KEY, JSON.stringify(clean))
 }
 
@@ -396,14 +420,23 @@ export function useLogin() {
     appId.value = creds.appId
 
     if (userStore.isLoggedIn) {
-      logger.log('login', '检测到本地已有登录态，直接切换到主布局')
+      logger.log('login', '检测到本地 token，向服务端验证有效性...')
       loading.value = true
       try {
+        await userHeartbeatApi({ app_id: appId.value, token: userStore.token, device_id: deviceId.value })
+        logger.log('login', 'token 验证通过，进入主布局')
+        startHeartbeat(userStore.token)
         await switchToMainLayout(router)
       } catch (e) {
-        logger.error('login', '切换到主布局失败', e)
+        logger.warn('login', 'token 验证失败，清除登录态', { message: (e as Error)?.message })
+        userStore.logout()
+        errMsg.value = ''
       }
       loading.value = false
+      if (!userStore.isLoggedIn) {
+        await showWindow()
+        return
+      }
       return
     }
 

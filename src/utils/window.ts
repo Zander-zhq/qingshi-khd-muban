@@ -6,9 +6,9 @@ import { logger } from './logger'
 import { getTemplate } from '../brand'
 
 const LOGIN_LAYOUTS: Record<string, { width: number; height: number }> = {
-  green:  { width: 420, height: 640 },
+  green:  { width: 480, height: 720 },
   orange: { width: 760, height: 560 },
-  dark:   { width: 480, height: 680 },
+  dark:   { width: 520, height: 680 },
 }
 const MAIN_LAYOUT = { width: 1440, height: 900, minWidth: 1200, minHeight: 760 }
 

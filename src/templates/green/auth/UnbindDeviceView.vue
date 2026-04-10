@@ -16,6 +16,7 @@ const {
   <div class="window-shell">
     <div class="window-content">
       <TitleBar variant="auth" />
+      <div class="scroll-body">
       <div class="banner">
         <div class="bc bc-1"></div>
         <div class="bc bc-2"></div>
@@ -84,13 +85,16 @@ const {
           </a>
         </div>
       </div>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .window-shell { height: 100vh; width: 100vw; background: #fff; }
-.window-content { height: 100%; width: 100%; display: flex; flex-direction: column; background: #fff; overflow-y: auto; }
+.window-content { height: 100%; width: 100%; display: flex; flex-direction: column; background: #fff; overflow: hidden; }
+.window-content :deep(.app-titlebar) { flex-shrink: 0; }
+.scroll-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
 .window-content :deep(.app-titlebar.titlebar-compact) { position: relative; }
 
 .banner { height: 100px; position: relative; background: var(--qs-bg-gradient); flex-shrink: 0; overflow: visible; display: flex; align-items: center; justify-content: center; }

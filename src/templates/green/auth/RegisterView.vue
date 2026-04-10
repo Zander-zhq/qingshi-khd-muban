@@ -15,6 +15,7 @@ const {
   <div class="window-shell">
     <div class="window-content">
       <TitleBar variant="auth" />
+      <div class="scroll-body">
       <div class="banner">
         <div class="bc bc-1"></div>
         <div class="bc bc-2"></div>
@@ -92,6 +93,7 @@ const {
           </a>
         </div>
       </div>
+      </div>
     </div>
   </div>
 </template>
@@ -109,7 +111,16 @@ const {
   display: flex;
   flex-direction: column;
   background: #fff;
+  overflow: hidden;
+}
+
+.window-content :deep(.app-titlebar) { flex-shrink: 0; }
+
+.scroll-body {
+  flex: 1;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .window-content :deep(.app-titlebar.titlebar-compact) {

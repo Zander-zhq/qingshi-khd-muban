@@ -122,6 +122,11 @@ service.interceptors.response.use(
       responseData: error.response?.data,
       message: error.message,
     })
+
+    if (!error.response && (error.message === 'Network Error' || error.code === 'ERR_NETWORK' || error.code === 'ECONNABORTED')) {
+      return Promise.reject(new Error('无法连接服务器，请检查网络连接'))
+    }
+
     const detail = error.response?.data?.detail
     const message = error.response?.data?.msg
       || (Array.isArray(detail) ? detail.map((d: any) => d.msg || JSON.stringify(d)).join('; ') : (typeof detail === 'string' ? detail : null))

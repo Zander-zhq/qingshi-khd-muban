@@ -23,6 +23,7 @@ const {
 <template>
   <div class="page-shell">
     <TitleBar variant="auth" />
+    <div class="scroll-body">
     <div class="page-split">
       <div class="left-panel">
         <div class="lp-deco lp-deco-1"></div>
@@ -138,6 +139,7 @@ const {
           </div>
         </div>
       </div>
+    </div>
     </div>
 
     <!-- 支付二维码弹窗 -->

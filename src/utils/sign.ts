@@ -89,11 +89,13 @@ export async function createSignHeaders(body: Record<string, unknown>): Promise<
   const signString = buildSignString(body, timestamp, nonce)
   const sign = computeHmacSign(signString, appKey)
 
-  logger.log('sign', '签名计算', {
-    bodyKeys: Object.keys(body),
-    signString,
-    sign,
-  })
+  if (import.meta.env.DEV) {
+    logger.log('sign', '签名计算', {
+      bodyKeys: Object.keys(body),
+      signString,
+      sign,
+    })
+  }
 
   return {
     'X-App-Id': appId,

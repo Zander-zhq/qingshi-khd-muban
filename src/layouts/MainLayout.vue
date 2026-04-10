@@ -98,6 +98,12 @@ onMounted(() => {
       userStore.logout()
       await switchToLoginLayout(router)
     },
+    async onServerUnreachable(msg) {
+      logger.warn('main-layout', '服务器不可达，强制下线', { msg })
+      await showDialog({ title: '连接断开', message: msg || '无法连接到服务器，请检查网络后重新登录' })
+      userStore.logout()
+      await switchToLoginLayout(router)
+    },
   })
 
   const info = userStore.userInfo

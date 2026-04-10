@@ -21,6 +21,7 @@ const {
     <div class="window-content">
       <TitleBar variant="auth" />
 
+      <div class="scroll-body">
       <div class="body">
         <div class="form-card">
           <h2 class="card-title">充值中心</h2>
@@ -139,6 +140,7 @@ const {
           </div>
         </div>
       </div>
+      </div>
 
       <!-- 支付二维码弹窗 -->
       <Transition name="modal">
@@ -187,7 +189,18 @@ const {
   display: flex;
   flex-direction: column;
   background: #0F172A;
+  overflow: hidden;
+}
+
+.window-content :deep(.app-titlebar) {
+  flex-shrink: 0;
+}
+
+.scroll-body {
+  flex: 1;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 
 .body {

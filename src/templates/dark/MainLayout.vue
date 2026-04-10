@@ -413,7 +413,11 @@ function handleExpiredLogout() {
           </div>
         </header>
         <main class="content-shell">
-          <RouterView />
+          <RouterView v-slot="{ Component }">
+            <KeepAlive>
+              <component :is="Component" />
+            </KeepAlive>
+          </RouterView>
         </main>
       </section>
 

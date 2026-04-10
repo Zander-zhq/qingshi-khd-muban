@@ -20,6 +20,7 @@ const {
   <div class="login-shell">
     <TitleBar variant="auth" />
 
+    <div class="scroll-body">
     <div class="login-split">
       <!-- ========== Left: Brand Panel ========== -->
       <div class="left-panel">
@@ -115,6 +116,7 @@ const {
         </div>
       </div>
     </div>
+    </div>
   </div>
 </template>
 
@@ -123,9 +125,21 @@ const {
 @keyframes spin { to { transform: rotate(360deg) } }
 
 .login-shell {
-  height: 100vh; width: 100vw; display: flex; flex-direction: column; overflow-y: auto;
+  height: 100vh; width: 100vw; display: flex; flex-direction: column; overflow: hidden;
   font-family: "HarmonyOS Sans", "PingFang SC", "Helvetica Neue", system-ui, sans-serif;
   animation: fade-in 0.3s ease-out;
+}
+
+.login-shell :deep(.app-titlebar) {
+  flex-shrink: 0;
+}
+
+.scroll-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .login-split { flex: 1; display: flex; min-height: 0; }
