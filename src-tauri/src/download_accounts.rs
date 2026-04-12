@@ -35,7 +35,7 @@ pub fn list_download_accounts(state: tauri::State<'_, DbState>) -> Result<Vec<Pl
         let mut stmt = conn.prepare(
             "SELECT id, platform, name, avatar, cookies, status, remark, created_at, updated_at
              FROM platform_accounts
-             WHERE platform IN ('douyin', 'kuaishou', 'bilibili', 'migu')
+             WHERE platform IN ('douyin', 'kuaishou', 'bilibili', 'migu', 'xiaohongshu')
              ORDER BY id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -209,6 +209,9 @@ pub async fn check_download_cookie_status(cookies: String, platform: String) -> 
         "migu" => {
             Ok(cookies.contains("checked_token=") || cookies.contains("UserInfo="))
         }
+        "xiaohongshu" => {
+            Ok(cookies.contains("a1=") && cookies.contains("web_session="))
+        }
         _ => Ok(false),
     }
 }
@@ -335,6 +338,10 @@ fn build_login_script(platform: &str) -> String {
             return hasCookie('DedeUserID');
         }} else if (PLATFORM === 'migu') {{
             return hasCookie('checked_token') || hasCookie('UserInfo');
+        }} else if (PLATFORM === 'xiaohongshu') {{
+            if (window.location.href.indexOf('login') !== -1 || document.title.indexOf('\u5b89\u5168\u9a8c\u8bc1') !== -1) return false;
+            var meEl = document.querySelector('nav a[href*="/user/profile/"]') || document.querySelector('[class*=channel] a[href*="/user/profile/"]');
+            return !!meEl;
         }}
         return false;
     }}
@@ -369,6 +376,26 @@ fn build_login_script(platform: &str) -> String {
                 var avatarImg = document.querySelector('img[src*="aweme"][src*="avatar"]')
                     || document.querySelector('img[alt*="头像"]');
                 doCallback(name, avatarImg ? avatarImg.src : '');
+            }}
+        }}, 1000);
+        return;
+    }}
+
+    if (PLATFORM === 'xiaohongshu' && window.location.pathname.indexOf('/user/profile/') !== -1) {{
+        if (document.title.indexOf('\u5b89\u5168\u9a8c\u8bc1') !== -1) {{
+            window.location.href = 'https://www.xiaohongshu.com/';
+            return;
+        }}
+        var xhsProfileRetry = 0;
+        var xhsProfileTimer = setInterval(function() {{
+            if (REDIRECTING) {{ clearInterval(xhsProfileTimer); return; }}
+            xhsProfileRetry++;
+            if (xhsProfileRetry > 20) {{ clearInterval(xhsProfileTimer); return; }}
+            var nameEl = document.querySelector('.user-name');
+            var avatarEl = document.querySelector('.avatar-wrapper img') || document.querySelector('img[class*=avatar]');
+            if (nameEl && nameEl.textContent && nameEl.textContent.trim()) {{
+                clearInterval(xhsProfileTimer);
+                doCallback(nameEl.textContent.trim(), avatarEl ? avatarEl.src : '');
             }}
         }}, 1000);
         return;
@@ -437,6 +464,28 @@ fn build_login_script(platform: &str) -> String {
             }} catch(e) {{}}
             var uidMatch = document.cookie.match(/UserInfo=([^|]+)/);
             doCallback(uidMatch ? uidMatch[1] : 'migu_user', '');
+        }} else if (PLATFORM === 'xiaohongshu') {{
+            if (window.location.href.indexOf('login') !== -1 || document.title.indexOf('\u5b89\u5168\u9a8c\u8bc1') !== -1) return;
+            var meLink = document.querySelector('nav a[href*="/user/profile/"]') || document.querySelector('[class*=channel] a[href*="/user/profile/"]');
+            if (!meLink) return;
+            if (DETECTED) return;
+            DETECTED = true;
+            var profileUrl = meLink.href;
+            if (window.location.href.indexOf('/user/profile/') === -1) {{
+                window.location.href = profileUrl;
+                return;
+            }}
+            var xhsRetry = 0;
+            var xhsTimer = setInterval(function() {{
+                xhsRetry++;
+                if (xhsRetry > 15 || REDIRECTING) {{ clearInterval(xhsTimer); return; }}
+                var nameEl = document.querySelector('.user-name');
+                var avatarEl = document.querySelector('.avatar-wrapper img') || document.querySelector('img[class*=avatar]');
+                if (nameEl && nameEl.textContent && nameEl.textContent.trim()) {{
+                    clearInterval(xhsTimer);
+                    doCallback(nameEl.textContent.trim(), avatarEl ? avatarEl.src : '');
+                }}
+            }}, 1000);
         }}
     }}
 
@@ -525,6 +574,7 @@ pub async fn open_download_login(
         "kuaishou" => ("https://www.kuaishou.com", ".kuaishou.com"),
         "bilibili" => ("https://www.bilibili.com", ".bilibili.com"),
         "migu" => ("https://www.miguvideo.com", ".miguvideo.com"),
+        "xiaohongshu" => ("https://www.xiaohongshu.com", ".xiaohongshu.com"),
         _ => return Err("不支持的平台".into()),
     };
 

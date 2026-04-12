@@ -952,6 +952,8 @@ pub fn run() {
             download_parse::api_parse_cctv_video,
             download_parse::api_parse_cctv_column,
             download_parse::api_parse_yangshipin_video,
+            download_parse::api_parse_xiaohongshu_video,
+            download_parse::api_parse_xiaohongshu_homepage,
             cdp_parse::cdp_open_login,
             cdp_parse::cdp_close_login,
             get_setting,

@@ -247,6 +247,7 @@ function detectPlatform(url: string): string {
   if (url.includes('miguvideo.com')) return 'migu'
   if (url.includes('tv.cctv.com') || url.includes('cctv.com/video')) return 'cctv'
   if (url.includes('yangshipin.cn')) return 'yangshipin'
+  if (url.includes('xiaohongshu.com') || url.includes('xhslink.com')) return 'xiaohongshu'
   return ''
 }
 
@@ -255,8 +256,8 @@ function extractUrl(text: string): string {
   return m ? m[0] : text.trim()
 }
 
-const platformLabelMap: Record<string, string> = { douyin: 'DY', kuaishou: 'KS', bilibili: 'BLB', migu: 'MG', cctv: 'CCTV', yangshipin: 'YSP' }
-const platformClassMap: Record<string, string> = { DY: 'vd-plat--dy', KS: 'vd-plat--ks', BLB: 'vd-plat--blb', MG: 'vd-plat--mg', CCTV: 'vd-plat--cctv', YSP: 'vd-plat--ysp' }
+const platformLabelMap: Record<string, string> = { douyin: 'DY', kuaishou: 'KS', bilibili: 'BLB', migu: 'MG', cctv: 'CCTV', yangshipin: 'YSP', xiaohongshu: '小红薯' }
+const platformClassMap: Record<string, string> = { DY: 'vd-plat--dy', KS: 'vd-plat--ks', BLB: 'vd-plat--blb', MG: 'vd-plat--mg', CCTV: 'vd-plat--cctv', YSP: 'vd-plat--ysp', '小红薯': 'vd-plat--xhs' }
 
 const AUTHOR_COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
@@ -291,6 +292,10 @@ function detectUrlType(resolvedUrl: string): 'video' | 'homepage' | 'compilation
     return 'video'
   }
   if (resolvedUrl.includes('yangshipin.cn')) return 'video'
+  if (resolvedUrl.includes('xiaohongshu.com')) {
+    if (resolvedUrl.includes('/user/profile/')) return 'homepage'
+    return 'video'
+  }
   if (resolvedUrl.includes('kuaishou.com') || resolvedUrl.includes('live.kuaishou.com')) {
     if (resolvedUrl.includes('/profile/')) return 'homepage'
     return 'video'
@@ -861,6 +866,104 @@ function parseYangshipinDetail(d: Record<string, unknown>): ParsedVideoInfo {
   }
 }
 
+function parseXiaohongshuDetail(d: Record<string, unknown>): ParsedVideoInfo {
+  const user = (d.user || {}) as Record<string, unknown>
+  const interact = (d.interactInfo || {}) as Record<string, unknown>
+  const durationMs = Number(d.duration || 0)
+  const timestamp = Number(d.time || 0)
+  const vw = Number(d.video_width || 0)
+  const vh = Number(d.video_height || 0)
+  const videoSize = Number(d.video_size || 0)
+  const noteType = String(d.type || 'video')
+  const title = String(d.title || '')
+  const desc = String(d.desc || '')
+  const publishTime = timestamp > 0
+    ? new Date(timestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-')
+    : '无'
+
+  const images = (d.images || []) as string[]
+  const isImage = noteType !== 'video' || (!d.video_url && images.length > 0)
+
+  return {
+    platform: '小红薯',
+    avatar: String(user.avatar || ''),
+    author_name: String(user.nickname || ''),
+    author_id: String(user.userId || ''),
+    author_uid: String(user.userId || ''),
+    author_desc: '无',
+    home_url: user.userId ? `https://www.xiaohongshu.com/user/profile/${user.userId}` : '无',
+    video_id: String(d.noteId || ''),
+    video_name: title || desc || '无',
+    hash: '',
+    video_url: isImage ? images.join('\n') : String(d.video_url || ''),
+    video_url_fallbacks: [],
+    cover_url: images.length > 0 ? images[0] : '',
+    cover_url_fallbacks: [],
+    collection_name: '',
+    topics: desc || '无',
+    publish_time: publishTime,
+    publish_timestamp: timestamp,
+    video_width: vw,
+    video_height: vh,
+    duration: durationMs / 1000,
+    video_ext: isImage ? '图片' : 'mp4',
+    video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
+    video_bitrate: '无',
+    video_size: videoSize > 0 ? formatFileSize(videoSize) : '无',
+    video_codec: isImage ? '图片' : 'H264',
+    cover_width: 0, cover_height: 0, cover_resolution: '无',
+    likes: parseCnNumber(String(interact.likedCount || '0')),
+    plays: 0,
+    shares: parseCnNumber(String(interact.shareCount || '0')),
+    comments: parseCnNumber(String(interact.commentCount || '0')),
+    favorites: parseCnNumber(String(interact.collectedCount || '0')),
+  }
+}
+
+function parseXiaohongshuHomepageItem(item: Record<string, unknown>): ParsedVideoInfo {
+  const noteId = String(item.noteId || item.note_id || '')
+  const title = String(item.title || item.display_title || '')
+  const isVideo = item.isVideo === true || String(item.type || '') === 'video'
+  const cover = typeof item.cover === 'string' ? item.cover : String((item.cover as Record<string, unknown>)?.url_default || (item.cover as Record<string, unknown>)?.url || '')
+  const interactInfo = (item.interact_info || {}) as Record<string, unknown>
+  const likes = String(item.likes || interactInfo.liked_count || '0')
+  const user = (item.user || {}) as Record<string, unknown>
+  const vw = Number(item.width || (item.cover as Record<string, unknown>)?.width || 0)
+  const vh = Number(item.height || (item.cover as Record<string, unknown>)?.height || 0)
+
+  return {
+    platform: '小红薯',
+    avatar: String(item.__author_avatar__ || user.avatar || ''),
+    author_name: String(item.__author_name__ || user.nickname || user.nick_name || ''),
+    author_id: String(item.__user_id__ || user.user_id || ''),
+    author_uid: String(item.__user_id__ || user.user_id || ''),
+    author_desc: '无',
+    home_url: item.__user_id__ ? `https://www.xiaohongshu.com/user/profile/${item.__user_id__}` : '无',
+    video_id: noteId,
+    video_name: title || '无',
+    hash: '',
+    video_url: '',
+    video_url_fallbacks: [],
+    cover_url: cover,
+    cover_url_fallbacks: [],
+    collection_name: '',
+    topics: '无',
+    publish_time: '无',
+    publish_timestamp: 0,
+    video_width: 0,
+    video_height: 0,
+    duration: 0,
+    video_ext: isVideo ? 'mp4' : '图片',
+    video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
+    video_bitrate: '无',
+    video_size: '无',
+    video_codec: isVideo ? 'H264' : '图片',
+    cover_width: 0, cover_height: 0, cover_resolution: '无',
+    likes: parseCnNumber(likes),
+    plays: 0, shares: 0, comments: 0, favorites: 0,
+  }
+}
+
 function upsertItem(info: ParsedVideoInfo, tab: string): boolean {
   const existing = allVideos.value.find(item => item.video_id === info.video_id)
   if (existing) {
@@ -953,6 +1056,8 @@ async function startParse() {
         info = parseMiguHomepageItem(item)
       } else if (p === 'cctv' && t === 'homepage') {
         info = parseCctvColumnItem(item)
+      } else if (p === 'xiaohongshu' && t === 'homepage') {
+        info = parseXiaohongshuHomepageItem(item)
       }
       if (info) {
         if (currentCollectionName) info.collection_name = currentCollectionName
@@ -1046,6 +1151,26 @@ async function startParse() {
         const detail = JSON.parse(rawData) as Record<string, unknown>
         const info = parseYangshipinDetail(detail)
         if (!info.video_url) throw new Error('未能获取到视频播放地址')
+        upsertItem(info, ''); successCount++
+      } else if (urlType === 'homepage' && platform === 'xiaohongshu') {
+        const userIdMatch = resolvedUrl.match(/\/user\/profile\/([a-f0-9]+)/)
+        const xhsUserId = userIdMatch?.[1]
+        if (!xhsUserId) throw new Error('无法从URL提取小红薯用户ID')
+        parseProgress.message = `第${i + 1}/${lines.length}条 正在加载小红薯主页...`
+        setHint(`第${i + 1}/${lines.length}条 正在加载小红薯主页...`)
+        cdpItemCount = 0
+        const xhsPool = await getPlatformCookiePool('xiaohongshu')
+        await lazyEnsureCdp()
+        await invoke<string>('api_parse_xiaohongshu_homepage', { userId: xhsUserId, cookies: xhsPool[0].cookies })
+        if (cdpItemCount === 0) throw new Error('该用户主页未找到作品数据')
+        successCount += cdpItemCount
+      } else if (platform === 'xiaohongshu') {
+        setHint(`第${i + 1}/${lines.length}条 正在解析小红薯...`)
+        const xhsPool = await getPlatformCookiePool('xiaohongshu')
+        const rawData = await invoke<string>('api_parse_xiaohongshu_video', { noteUrl: resolvedUrl, cookies: xhsPool[0].cookies })
+        if (!rawData) throw new Error('小红薯返回空数据')
+        const detail = JSON.parse(rawData) as Record<string, unknown>
+        const info = parseXiaohongshuDetail(detail)
         upsertItem(info, ''); successCount++
       } else if ((urlType === 'compilation' || isCompilationUrl || (isCompilationText && urlType === 'video')) && platform === 'douyin') {
         const isCollectionUrl = resolvedUrl.includes('/collection/')
@@ -1266,6 +1391,9 @@ async function startBatchDownload() {
           let videoUrl = item.video_url && item.video_url !== '无' ? item.video_url : ''
           if (!videoUrl && item.platform === 'MG' && item.video_id) {
             videoUrl = `migu://resolve/${item.video_id}`
+          }
+          if (!videoUrl && item.platform === '小红薯' && item.video_id && item.video_codec !== '图片') {
+            videoUrl = `xhs://resolve/${item.video_id}`
           }
           if (videoUrl) {
             const ext = item.video_ext && item.video_ext !== '无' ? item.video_ext : 'mp4'
@@ -1908,6 +2036,7 @@ onActivated(() => {
 .vd-plat--mg { background: #e62e2e !important; color: #fff !important; }
 .vd-plat--cctv { background: #c41230 !important; color: #fff !important; }
 .vd-plat--ysp { background: #ff6600 !important; color: #fff !important; }
+.vd-plat--xhs { background: #ff2442 !important; color: #fff !important; }
 
 /* ═══ 作者标签 ═══ */
 .vd-author-tag {

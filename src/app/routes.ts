@@ -34,16 +34,6 @@ const appRoutes: RouteRecordRaw[] = [
       menuItem: { label: '下载设置', icon: 'pi pi-cog', order: 90 },
     },
   },
-  {
-    path: 'chrome-demo',
-    name: 'ChromeDemo',
-    component: () => import('./pages/ChromeDemoView.vue'),
-    meta: {
-      title: `Chrome演示 - ${brand.brand_name}`,
-      requiresAuth: true,
-      menuItem: { label: 'Chrome演示', icon: 'pi pi-globe', order: 99 },
-    },
-  },
 ]
 
 export default appRoutes
