@@ -27,6 +27,7 @@
         { "url": "https://km-dev.hygjx.com/**" },
         { "url": "https://resource.huayunjingling.cn/**" }
       ]
-    }
+    },
+    "dialog:default"
   ]
 }

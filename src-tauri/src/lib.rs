@@ -19,6 +19,11 @@ use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod app_config;
+mod cdp_parse;
+mod chrome_app;
+mod database;
+mod download_accounts;
+mod download_parse;
 use app_config::{APP_ID, APP_KEY};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -81,6 +86,24 @@ fn reveal_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn exit_app(app: AppHandle) {
+    if let Some(state) = app.try_state::<chrome_app::ChromeProcess>() {
+        if let Ok(mut guard) = state.0.lock() {
+            if let Some(ref mut child) = *guard {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            *guard = None;
+        }
+    }
+    if let Some(state) = app.try_state::<chrome_app::LoginSessionManager>() {
+        if let Ok(mut sessions) = state.0.lock() {
+            for (_, session) in sessions.iter_mut() {
+                let _ = session.child.kill();
+                let _ = session.child.wait();
+            }
+            sessions.clear();
+        }
+    }
     app.exit(0);
 }
 
@@ -790,10 +813,20 @@ async fn download_file_to_dir(
 }
 
 #[tauri::command]
-fn get_download_dir(app: AppHandle) -> Result<String, String> {
-    let dir = app.path().app_data_dir()
-        .map_err(|e| format!("获取数据目录失败: {}", e))?
-        .join("downloads");
+fn get_download_dir(_app: AppHandle) -> Result<String, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("获取程序路径失败: {}", e))?;
+    let install_dir = exe.parent()
+        .ok_or_else(|| "无法获取程序所在目录".to_string())?;
+
+    let dir = if install_dir.to_string_lossy().contains("target\\debug")
+        || install_dir.to_string_lossy().contains("target/debug")
+    {
+        PathBuf::from("E:\\00000")
+    } else {
+        install_dir.join("downloads")
+    };
+
     fs::create_dir_all(&dir).map_err(|e| format!("创建下载目录失败: {}", e))?;
     Ok(dir.to_string_lossy().to_string())
 }
@@ -815,12 +848,57 @@ async fn run_installer_and_exit(app: AppHandle, installer_path: String) -> Resul
     Ok(())
 }
 
+#[tauri::command]
+fn get_setting(key: String, app: AppHandle) -> Result<Option<String>, String> {
+    let db = app.state::<database::DbState>();
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
+        let result = stmt.query_row(rusqlite::params![key], |row| row.get::<_, String>(0));
+        match result {
+            Ok(val) => Ok(Some(val)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+}
+
+#[tauri::command]
+fn set_setting(key: String, value: String, app: AppHandle) -> Result<(), String> {
+    let db = app.state::<database::DbState>();
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn get_all_settings(app: AppHandle) -> Result<std::collections::HashMap<String, String>, String> {
+    let db = app.state::<database::DbState>();
+    db.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT key, value FROM app_settings")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            map.insert(k, v);
+        }
+        Ok(map)
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_device_id,
             get_app_credentials,
@@ -841,9 +919,55 @@ pub fn run() {
             compute_file_sha256,
             download_file_to_dir,
             get_download_dir,
-            run_installer_and_exit
+            run_installer_and_exit,
+            download_accounts::list_download_accounts,
+            download_accounts::upsert_download_account,
+            download_accounts::update_platform_account,
+            download_accounts::delete_platform_account,
+            download_accounts::check_download_cookie_status,
+            download_accounts::open_download_login,
+            download_accounts::capture_download_cookies,
+            download_accounts::close_download_webview,
+            download_parse::resolve_video_url,
+            download_parse::batch_download_videos,
+            // Legacy WebView commands (kuaishou/bilibili, 仍由 CDP 调用)
+            download_parse::fetch_kuaishou_video,
+            download_parse::fetch_kuaishou_homepage,
+            download_parse::fetch_kuaishou_homepage_api,
+            download_parse::fetch_bilibili_video,
+            download_parse::fetch_bilibili_homepage,
+            chrome_app::launch_chrome_app,
+            chrome_app::kill_chrome_app,
+            chrome_app::is_chrome_running,
+            chrome_app::check_chrome_installed,
+            cdp_parse::cdp_ensure_chrome,
+            cdp_parse::cdp_check_login,
+            cdp_parse::cdp_show_chrome,
+            cdp_parse::cdp_hide_chrome,
+            cdp_parse::cdp_kill_chrome,
+            download_parse::api_parse_douyin_video,
+            download_parse::api_parse_douyin_homepage,
+            download_parse::api_parse_douyin_collection,
+            download_parse::api_find_douyin_mix_id,
+            cdp_parse::cdp_parse_kuaishou_video,
+            cdp_parse::cdp_parse_kuaishou_homepage,
+            cdp_parse::cdp_parse_bilibili_video,
+            cdp_parse::cdp_parse_bilibili_homepage,
+            cdp_parse::cdp_open_login,
+            cdp_parse::cdp_close_login,
+            get_setting,
+            set_setting,
+            get_all_settings
         ])
         .setup(|app| {
+            let db = database::init_database(&app.handle())
+                .expect("数据库初始化失败");
+            app.manage(db);
+
+            app.manage(chrome_app::ChromeProcess(std::sync::Mutex::new(None)));
+            app.manage(chrome_app::LoginSessionManager(std::sync::Mutex::new(std::collections::HashMap::new())));
+            app.manage(cdp_parse::ChromeSessionState(tokio::sync::Mutex::new(cdp_parse::ChromeSession::new())));
+
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "windows")]
                 apply_rounded_corners(&window);
