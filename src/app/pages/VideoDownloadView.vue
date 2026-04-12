@@ -96,6 +96,7 @@ const isParsing = ref(false)
 const parseCancelled = ref(false)
 const activeTab = ref(0)
 const hintMessage = ref('')
+const hintIsError = ref(false)
 let nextId = 1
 
 const allVideos = ref<VideoItem[]>([])
@@ -179,7 +180,7 @@ function startSpeedTracker() {
     if (elapsed > 0) {
       const speed = (dlProgress.bytes - dlLastBytes) / elapsed
       dlSpeed.value = speed > 1048576 ? `${(speed / 1048576).toFixed(1)} MB/s`
-        : speed > 1024 ? `${(speed / 1024).toFixed(0)} KB/s` : ''
+        : speed > 1024 ? `${(speed / 1024).toFixed(0)} KB/s` : '0 MB/s'
     }
     dlLastBytes = dlProgress.bytes
     dlLastTime = now
@@ -201,7 +202,7 @@ const tabCounts = computed(() => ({
 
 // ── 辅助函数 ──────────────────────────────────────────────────────
 
-function setHint(msg: string) { hintMessage.value = msg }
+function setHint(msg: string, isError = false) { hintMessage.value = msg; hintIsError.value = isError }
 
 function formatDuration(seconds: number): string {
   if (!seconds) return '--'
@@ -243,6 +244,9 @@ function detectPlatform(url: string): string {
   if (url.includes('douyin.com') || url.includes('v.douyin.com')) return 'douyin'
   if (url.includes('kuaishou.com')) return 'kuaishou'
   if (url.includes('bilibili.com') || url.includes('b23.tv')) return 'bilibili'
+  if (url.includes('miguvideo.com')) return 'migu'
+  if (url.includes('tv.cctv.com') || url.includes('cctv.com/video')) return 'cctv'
+  if (url.includes('yangshipin.cn')) return 'yangshipin'
   return ''
 }
 
@@ -251,8 +255,8 @@ function extractUrl(text: string): string {
   return m ? m[0] : text.trim()
 }
 
-const platformLabelMap: Record<string, string> = { douyin: 'DY', kuaishou: 'KS', bilibili: 'BLB' }
-const platformClassMap: Record<string, string> = { DY: 'vd-plat--dy', KS: 'vd-plat--ks', BLB: 'vd-plat--blb' }
+const platformLabelMap: Record<string, string> = { douyin: 'DY', kuaishou: 'KS', bilibili: 'BLB', migu: 'MG', cctv: 'CCTV', yangshipin: 'YSP' }
+const platformClassMap: Record<string, string> = { DY: 'vd-plat--dy', KS: 'vd-plat--ks', BLB: 'vd-plat--blb', MG: 'vd-plat--mg', CCTV: 'vd-plat--cctv', YSP: 'vd-plat--ysp' }
 
 const AUTHOR_COLORS = [
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6',
@@ -278,6 +282,15 @@ function showTooltip(e: MouseEvent, text: string) {
 function hideTooltip() { tooltip.visible = false }
 
 function detectUrlType(resolvedUrl: string): 'video' | 'homepage' | 'compilation' {
+  if (resolvedUrl.includes('miguvideo.com')) {
+    if (resolvedUrl.includes('/p/user/') || resolvedUrl.includes('authorId=')) return 'homepage'
+    return 'video'
+  }
+  if (resolvedUrl.includes('cctv.com')) {
+    if (resolvedUrl.includes('/lm/') || resolvedUrl.includes('/lanmu/')) return 'homepage'
+    return 'video'
+  }
+  if (resolvedUrl.includes('yangshipin.cn')) return 'video'
   if (resolvedUrl.includes('kuaishou.com') || resolvedUrl.includes('live.kuaishou.com')) {
     if (resolvedUrl.includes('/profile/')) return 'homepage'
     return 'video'
@@ -319,6 +332,10 @@ function extractVideoId(platform: string, resolvedUrl: string): string {
       const photoId = new URL(resolvedUrl).searchParams.get('photoId')
       if (photoId) return photoId
     } catch { /* ignore */ }
+  }
+  if (platform === 'migu') {
+    const m = resolvedUrl.match(/\/p\/(?:vertical|detail)\/(\d+)/)
+    if (m) return m[1]
   }
   throw new Error(`无法从URL提取视频ID: ${resolvedUrl}`)
 }
@@ -506,80 +523,55 @@ function parseKuaishouDetail(apolloState: Record<string, unknown>, photoId: stri
   }
 }
 
-function parseKuaishouLiveApiItem(item: Record<string, unknown>): ParsedVideoInfo {
-  const isGraphql = 'caption' in item || 'photoUrl' in item
-  const profileData = item.__kuaishou_profile__ as Record<string, unknown> | undefined
-  const profile = profileData?.profile as Record<string, unknown> | undefined
-
-  if (isGraphql) {
-    const userDefineId = String(profileData?.userDefineId || '')
-    const userId = String(profile?.user_id || '')
-    const ksId = userDefineId || userId
-    const caption = String(item.caption || '')
-    const durationMs = Number(item.duration || 0)
-    const timestamp = Number(item.timestamp || 0)
-    const videoRatio = Number(item.videoRatio || 0)
-    const vw = videoRatio > 0 && videoRatio < 1 ? 1080 : videoRatio > 1 ? 1920 : 0
-    const vh = vw > 0 && videoRatio > 0 ? Math.round(vw / videoRatio) : 0
-    const publishTime = timestamp > 0 ? new Date(timestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-') : '无'
-    const tags = caption.match(/#[^\s#]+/g)
-    return {
-      platform: 'KS', avatar: String(profile?.headurl || ''),
-      author_name: String(profile?.user_name || ''), author_id: ksId, author_uid: userId,
-      author_desc: String(profile?.user_text || '').replace(/\n/g, ' ') || '无',
-      home_url: userId ? `https://www.kuaishou.com/profile/${userId}` : '无',
-      video_id: String(item.id || ''), video_name: caption || '无', hash: '无',
-      video_url: String(item.photoUrl || '无'), video_url_fallbacks: [], cover_url: String(item.coverUrl || '无'), cover_url_fallbacks: [], collection_name: '',
-      topics: tags && tags.length > 0 ? tags.join(' ') : '无',
-      publish_time: publishTime, publish_timestamp: timestamp,
-      video_width: vw, video_height: vh, duration: durationMs / 1000,
-      video_ext: 'mp4', video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
-      video_bitrate: '无', video_size: '无', video_codec: '无',
-      cover_width: 0, cover_height: 0, cover_resolution: '无',
-      likes: Number(item.realLikeCount || 0) || parseCnNumber(String(item.likeCount || '0')),
-      plays: parseCnNumber(String(item.viewCount || '0')), shares: 0, comments: 0, favorites: 0,
-    }
-  }
-
+function parseKuaishouFeedItem(item: Record<string, unknown>): ParsedVideoInfo {
   const author = (item.author || {}) as Record<string, unknown>
-  const counts = (item.counts || {}) as Record<string, unknown>
+  const photo = (item.photo || {}) as Record<string, unknown>
   const authorId = String(author.id || '')
 
-  const enrichedCaption = String(item.__caption__ || '')
-  const enrichedDurationMs = Number(item.__duration__ || 0)
-  const enrichedTimestamp = Number(item.__timestamp__ || 0)
-  const enrichedRatio = Number(item.__videoRatio__ || 0)
-  const enrichedLike = item.__likeCount__ != null ? parseCnNumber(String(item.__likeCount__)) : Number(counts.like || 0)
-  const enrichedView = item.__viewCount__ != null ? parseCnNumber(String(item.__viewCount__)) : parseCnNumber(String(counts.displayView || '0'))
+  const caption = String(photo.caption || '')
+  const durationMs = Number(photo.duration || 0)
+  const timestamp = Number(photo.timestamp || 0)
+  const vw = Number(photo.width || 0)
+  const vh = Number(photo.height || 0)
 
-  const vw = enrichedRatio > 0
-    ? (enrichedRatio < 1 ? 1080 : enrichedRatio > 1 ? 1920 : 0)
-    : Number(item.width || 0)
-  const vh = enrichedRatio > 0 && vw > 0
-    ? Math.round(vw / enrichedRatio)
-    : Number(item.height || 0)
-
-  const publishTime = enrichedTimestamp > 0
-    ? new Date(enrichedTimestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-')
+  const publishTime = timestamp > 0
+    ? new Date(timestamp).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-')
     : '无'
-  const tags = enrichedCaption ? enrichedCaption.match(/#[^\s#]+/g) : null
+  const tags = caption.match(/#[^\s#]+/g)
+
+  const photoUrls = (photo.photoUrls || []) as { url?: string }[]
+  const videoUrl = photoUrls[0]?.url || ''
+  const fallbackUrls = photoUrls.slice(1).map(u => String(u.url || '')).filter(u => u)
+
+  const manifest = photo.manifest as Record<string, unknown> | undefined
+  const adaptSets = (manifest?.adaptationSet || []) as Record<string, unknown>[]
+  const reps = (adaptSets[0]?.representation || []) as Record<string, unknown>[]
+  const rep = reps[0] as Record<string, unknown> | undefined
+  const avgBitrate = Number(rep?.avgBitrate || 0)
+  const fileSize = Number(rep?.fileSize || 0)
+  const qualityType = String(rep?.qualityType || '')
+  const frameRate = Number(rep?.frameRate || 0)
 
   return {
-    platform: 'KS', avatar: String(author.avatar || profile?.headurl || ''),
-    author_name: String(author.name || profile?.user_name || ''), author_id: authorId,
-    author_uid: authorId, author_desc: String(profile?.user_text || '').replace(/\n/g, ' ') || '无',
-    home_url: authorId ? `https://live.kuaishou.com/profile/${authorId}` : '无',
-    video_id: String(item.id || ''), video_name: enrichedCaption || '无', hash: '无',
-    video_url: String(item.__photoUrl__ || item.playUrl || '无'), video_url_fallbacks: [],
-    cover_url: String(item.__coverUrl__ || item.poster || '无'), cover_url_fallbacks: [], collection_name: '',
+    platform: 'KS', avatar: String(author.headerUrl || ''),
+    author_name: String(author.name || ''), author_id: authorId,
+    author_uid: authorId, author_desc: '无',
+    home_url: authorId ? `https://www.kuaishou.com/profile/${authorId}` : '无',
+    video_id: String(photo.id || ''), video_name: caption || '无', hash: '无',
+    video_url: videoUrl || '无', video_url_fallbacks: fallbackUrls,
+    cover_url: String(photo.coverUrl || '无'), cover_url_fallbacks: [], collection_name: '',
     topics: tags && tags.length > 0 ? tags.join(' ') : '无',
-    publish_time: publishTime, publish_timestamp: enrichedTimestamp,
-    video_width: vw, video_height: vh, duration: enrichedDurationMs / 1000,
-    video_ext: 'mp4', video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
-    video_bitrate: '无', video_size: '无', video_codec: '无',
-    cover_width: 0, cover_height: 0, cover_resolution: '无',
-    likes: enrichedLike, plays: enrichedView,
-    shares: 0, comments: parseCnNumber(String(counts.displayComment || '0')), favorites: 0,
+    publish_time: publishTime, publish_timestamp: timestamp,
+    video_width: vw, video_height: vh, duration: durationMs / 1000,
+    video_ext: 'mp4',
+    video_resolution: qualityType || (vw && vh ? `${Math.min(vw, vh)}p` : '无'),
+    video_bitrate: avgBitrate > 0 ? `${avgBitrate}kbps` : '无',
+    video_size: fileSize > 0 ? formatFileSize(fileSize) : '无',
+    video_codec: rep ? 'H264' : '无',
+    cover_width: 0, cover_height: 0, cover_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
+    likes: Number(photo.likeCount || 0),
+    plays: Number(photo.viewCount || 0),
+    shares: 0, comments: 0, favorites: Number(photo.collectCount || 0),
   }
 }
 
@@ -601,7 +593,9 @@ function parseBilibiliDetail(d: Record<string, unknown>): ParsedVideoInfo {
     author_desc: String(owner.sign || ''),
     home_url: mid ? `https://space.bilibili.com/${mid}` : '',
     video_id: String(d.bvid || ''), video_name: String(d.title || ''), hash: '',
-    video_url: String(d.video_url || ''), video_url_fallbacks: [], cover_url: String(d.pic || ''), cover_url_fallbacks: [], collection_name: '',
+    video_url: String(d.video_url || ''),
+    video_url_fallbacks: ((d.video_url_fallbacks || []) as string[]).filter(u => u),
+    cover_url: String(d.pic || ''), cover_url_fallbacks: [], collection_name: '',
     topics: tags && tags.length > 0 ? tags.join(' ') : '',
     publish_time: publishTime, publish_timestamp: pubdate,
     video_width: vw, video_height: vh, duration,
@@ -634,7 +628,9 @@ function parseBilibiliFeedItem(item: Record<string, unknown>): ParsedVideoInfo {
     author_desc: String(card.sign || ''),
     home_url: mid ? `https://space.bilibili.com/${mid}` : '',
     video_id: String(item.bvid || ''), video_name: title, hash: '',
-    video_url: String(item.__video_url__ || ''), video_url_fallbacks: [], cover_url: String(item.pic || ''), cover_url_fallbacks: [], collection_name: '',
+    video_url: String(item.__video_url__ || ''),
+    video_url_fallbacks: ((item.__video_url_fallbacks__ || []) as string[]).filter(u => u),
+    cover_url: String(item.pic || ''), cover_url_fallbacks: [], collection_name: '',
     topics: tags && tags.length > 0 ? tags.join(' ') : '',
     publish_time: publishTime, publish_timestamp: created,
     video_width: vw, video_height: vh, duration,
@@ -649,7 +645,221 @@ function parseBilibiliFeedItem(item: Record<string, unknown>): ParsedVideoInfo {
   }
 }
 
+function parseMiguDetail(d: Record<string, unknown>): ParsedVideoInfo {
+  const play = (d.play || {}) as Record<string, unknown>
+  const content = (d.content || {}) as Record<string, unknown>
+  const resolution = (content.resolution || {}) as Record<string, unknown>
+  const pics = (play.h5pics || content.pics || {}) as Record<string, unknown>
+  const durationStr = String(play.duration || '0:00')
+  const dParts = durationStr.split(':')
+  const duration = dParts.length === 2 ? Number(dParts[0]) * 60 + Number(dParts[1]) : 0
+  const vw = Number(resolution.mediaWidth || 0)
+  const vh = Number(resolution.mediaHeight || 0)
+  const m3u8Url = String(d.m3u8_url || '')
+  const publishTime = String(content.publishTime || play.publishTime || '')
+  const authorId = String(content.author || '')
+
+  return {
+    platform: 'MG',
+    avatar: '',
+    author_name: authorId,
+    author_id: authorId,
+    author_uid: authorId,
+    author_desc: '无',
+    home_url: '无',
+    video_id: String(play.pID || d.contentId || ''),
+    video_name: String(play.name || play.detail || content.name || ''),
+    hash: '',
+    video_url: m3u8Url,
+    video_url_fallbacks: [],
+    cover_url: String(pics.highResolutionV || pics.highResolutionH || pics.lowResolutionH || ''),
+    cover_url_fallbacks: [],
+    collection_name: '',
+    topics: '无',
+    publish_time: publishTime || '无',
+    publish_timestamp: 0,
+    video_width: vw,
+    video_height: vh,
+    duration,
+    video_ext: 'mp4',
+    video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
+    video_bitrate: '无',
+    video_size: '无',
+    video_codec: 'H264',
+    cover_width: 0,
+    cover_height: 0,
+    cover_resolution: '无',
+    likes: Number(d.likeCount || 0),
+    plays: Number(d.playCount || 0),
+    shares: 0,
+    comments: Number(d.commentCount || 0),
+    favorites: 0,
+  }
+}
+
+function parseMiguHomepageItem(item: Record<string, unknown>): ParsedVideoInfo {
+  const pics = (item.pics || {}) as Record<string, unknown>
+  const durationStr = String(item.duration || '0:00')
+  const dParts = durationStr.split(':')
+  const duration = dParts.length === 2 ? Number(dParts[0]) * 60 + Number(dParts[1]) : 0
+  const publishTime = Number(item.publishTime || 0)
+  const publishStr = publishTime > 0
+    ? new Date(publishTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-')
+    : '无'
+  const direction = String(item.direction || '')
+  const vw = direction === 'vertical' ? 1080 : direction === 'horizontal' ? 1920 : 0
+  const vh = direction === 'vertical' ? 1920 : direction === 'horizontal' ? 1080 : 0
+  const m3u8Url = String(item.m3u8_url || '')
+
+  return {
+    platform: 'MG',
+    avatar: String(item.author_avatar || ''),
+    author_name: String(item.author_name || ''),
+    author_id: String(item.author_id || item.gkeUserid || ''),
+    author_uid: String(item.gkeUserid || item.author_id || ''),
+    author_desc: '无',
+    home_url: '无',
+    video_id: String(item.contentId || item.pID || ''),
+    video_name: String(item.name || item.description || ''),
+    hash: '',
+    video_url: m3u8Url,
+    video_url_fallbacks: [],
+    cover_url: String(pics.highResolutionV || pics.highResolutionH || pics.lowResolutionH || ''),
+    cover_url_fallbacks: [],
+    collection_name: '',
+    topics: '无',
+    publish_time: publishStr,
+    publish_timestamp: publishTime,
+    video_width: vw,
+    video_height: vh,
+    duration,
+    video_ext: 'mp4',
+    video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
+    video_bitrate: '无',
+    video_size: '无',
+    video_codec: 'H264',
+    cover_width: 0, cover_height: 0, cover_resolution: '无',
+    likes: 0, plays: 0, shares: 0, comments: 0, favorites: 0,
+  }
+}
+
 // ── 数据管理 ──────────────────────────────────────────────────────
+
+function parseCctvDetail(d: Record<string, unknown>): ParsedVideoInfo {
+  const durationSecs = Number(d.duration || 0)
+  const vw = Number(d.video_width || 0)
+  const vh = Number(d.video_height || 0)
+  const m3u8Url = String(d.m3u8_url || '')
+  const column = String(d.column || '')
+
+  return {
+    platform: 'CCTV',
+    avatar: '',
+    author_name: column || 'CCTV',
+    author_id: column,
+    author_uid: column,
+    author_desc: '无',
+    home_url: '无',
+    video_id: String(d.guid || ''),
+    video_name: String(d.title || ''),
+    hash: '',
+    video_url: m3u8Url,
+    video_url_fallbacks: [],
+    cover_url: String(d.cover_url || ''),
+    cover_url_fallbacks: [],
+    collection_name: '',
+    topics: '无',
+    publish_time: String(d.publish_time || '无'),
+    publish_timestamp: 0,
+    video_width: vw,
+    video_height: vh,
+    duration: durationSecs,
+    video_ext: 'mp4',
+    video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
+    video_bitrate: '无',
+    video_size: '无',
+    video_codec: 'H264',
+    cover_width: 0, cover_height: 0, cover_resolution: '无',
+    likes: 0, plays: 0, shares: 0, comments: 0, favorites: 0,
+  }
+}
+
+function parseCctvColumnItem(item: Record<string, unknown>): ParsedVideoInfo {
+  const lengthStr = String(item.length || '0:00')
+  const parts = lengthStr.split(':')
+  const duration = parts.length === 3
+    ? Number(parts[0]) * 3600 + Number(parts[1]) * 60 + Number(parts[2])
+    : parts.length === 2 ? Number(parts[0]) * 60 + Number(parts[1]) : 0
+  const timeStr = String(item.time || '')
+  const columnName = String(item.column_name || 'CCTV')
+
+  return {
+    platform: 'CCTV',
+    avatar: '',
+    author_name: columnName,
+    author_id: columnName,
+    author_uid: columnName,
+    author_desc: '无',
+    home_url: '无',
+    video_id: String(item.guid || ''),
+    video_name: String(item.title || ''),
+    hash: '',
+    video_url: String(item.m3u8_url || ''),
+    video_url_fallbacks: [],
+    cover_url: String(item.image || ''),
+    cover_url_fallbacks: [],
+    collection_name: '',
+    topics: '无',
+    publish_time: timeStr || '无',
+    publish_timestamp: 0,
+    video_width: 0,
+    video_height: 0,
+    duration,
+    video_ext: 'mp4',
+    video_resolution: '无',
+    video_bitrate: '无',
+    video_size: '无',
+    video_codec: 'H264',
+    cover_width: 0, cover_height: 0, cover_resolution: '无',
+    likes: 0, plays: 0, shares: 0, comments: 0, favorites: 0,
+  }
+}
+
+function parseYangshipinDetail(d: Record<string, unknown>): ParsedVideoInfo {
+  const durationSecs = Number(d.duration || 0)
+  const title = String(d.title || '')
+
+  return {
+    platform: 'YSP',
+    avatar: '',
+    author_name: '央视频',
+    author_id: 'yangshipin',
+    author_uid: 'yangshipin',
+    author_desc: '无',
+    home_url: 'https://yangshipin.cn',
+    video_id: String(d.vid || ''),
+    video_name: title,
+    hash: '',
+    video_url: String(d.mp4_url || ''),
+    video_url_fallbacks: [],
+    cover_url: '',
+    cover_url_fallbacks: [],
+    collection_name: '',
+    topics: '无',
+    publish_time: '无',
+    publish_timestamp: 0,
+    video_width: 0,
+    video_height: 0,
+    duration: durationSecs,
+    video_ext: 'mp4',
+    video_resolution: '无',
+    video_bitrate: '无',
+    video_size: '无',
+    video_codec: 'H264',
+    cover_width: 0, cover_height: 0, cover_resolution: '无',
+    likes: 0, plays: 0, shares: 0, comments: 0, favorites: 0,
+  }
+}
 
 function upsertItem(info: ParsedVideoInfo, tab: string): boolean {
   const existing = allVideos.value.find(item => item.video_id === info.video_id)
@@ -691,6 +901,7 @@ async function startParse() {
 
   const missing: string[] = []
   for (const p of neededPlatforms) {
+    if (p === 'cctv' || p === 'yangshipin') continue
     try { await getPlatformCookiePool(p) }
     catch { missing.push(platformLabelMap[p] || p) }
   }
@@ -733,11 +944,15 @@ async function startParse() {
       if (p === 'douyin') {
         info = parseDouyinDetail(item)
       } else if (p === 'kuaishou' && t === 'homepage') {
-        info = parseKuaishouLiveApiItem(item)
+        info = parseKuaishouFeedItem(item)
       } else if (p === 'bilibili' && t === 'homepage') {
         info = parseBilibiliFeedItem(item)
       } else if (p === 'bilibili') {
         info = parseBilibiliDetail(item)
+      } else if (p === 'migu' && t === 'homepage') {
+        info = parseMiguHomepageItem(item)
+      } else if (p === 'cctv' && t === 'homepage') {
+        info = parseCctvColumnItem(item)
       }
       if (info) {
         if (currentCollectionName) info.collection_name = currentCollectionName
@@ -752,7 +967,7 @@ async function startParse() {
     setHint(event.payload.message)
   })
 
-  let successCount = 0, failCount = 0
+  let successCount = 0, failCount = 0, lastErrorMsg = ''
   let currentCollectionName = ''
   parseProgress.current = 0; parseProgress.total = lines.length
   parseProgress.success = 0; parseProgress.failed = 0; parseProgress.message = '准备解析...'
@@ -803,7 +1018,36 @@ async function startParse() {
       const resolvedUrl = await invoke<string>('resolve_video_url', { url, platform })
       const urlType = detectUrlType(resolvedUrl)
 
-      if ((urlType === 'compilation' || isCompilationUrl || (isCompilationText && urlType === 'video')) && platform === 'douyin') {
+      if (platform === 'cctv') {
+        if (urlType === 'homepage') {
+          parseProgress.message = `第${i + 1}/${lines.length}条 正在加载央视栏目...`
+          setHint(`第${i + 1}/${lines.length}条 正在加载央视栏目...`)
+          cdpItemCount = 0
+          await invoke<string>('api_parse_cctv_column', { pageUrl: resolvedUrl })
+          if (cdpItemCount === 0) throw new Error('该栏目未找到视频数据')
+          successCount += cdpItemCount
+        } else {
+          setHint(`第${i + 1}/${lines.length}条 正在解析央视视频...`)
+          const rawData = await invoke<string>('api_parse_cctv_video', { pageUrl: resolvedUrl })
+          if (!rawData) throw new Error('央视返回空数据')
+          const detail = JSON.parse(rawData) as Record<string, unknown>
+          const info = parseCctvDetail(detail)
+          if (!info.video_url) throw new Error('未能获取到视频播放地址')
+          upsertItem(info, ''); successCount++
+        }
+      } else if (platform === 'yangshipin') {
+        const vidMatch = resolvedUrl.match(/vid=([a-zA-Z0-9]+)/)
+        const yspVid = vidMatch?.[1]
+        if (!yspVid) throw new Error('无法从URL提取央视频视频ID')
+        setHint(`第${i + 1}/${lines.length}条 正在解析央视频视频...`)
+        await lazyEnsureCdp()
+        const rawData = await invoke<string>('api_parse_yangshipin_video', { vid: yspVid })
+        if (!rawData) throw new Error('央视频返回空数据')
+        const detail = JSON.parse(rawData) as Record<string, unknown>
+        const info = parseYangshipinDetail(detail)
+        if (!info.video_url) throw new Error('未能获取到视频播放地址')
+        upsertItem(info, ''); successCount++
+      } else if ((urlType === 'compilation' || isCompilationUrl || (isCompilationText && urlType === 'video')) && platform === 'douyin') {
         const isCollectionUrl = resolvedUrl.includes('/collection/')
         const videoId = extractVideoId('douyin', isCompilationUrl ? url : resolvedUrl)
         parseProgress.message = `第${i + 1}/${lines.length}条 正在解析合集...`
@@ -842,19 +1086,22 @@ async function startParse() {
         const m = resolvedUrl.match(/\/profile\/([^/?#]+)/)
         const userId = m?.[1]
         if (!userId) throw new Error('无法从 URL 中提取快手用户ID')
+        if (resolvedUrl.includes('live.kuaishou.com') && !userId.startsWith('3x')) {
+          throw new Error('暂不支持快手手机主页链接，请使用电脑版主页链接（www.kuaishou.com/profile/...）')
+        }
         parseProgress.message = `第${i + 1}/${lines.length}条 正在加载主页...`
+        setHint(`第${i + 1}/${lines.length}条 正在加载快手主页...`)
         cdpItemCount = 0
-        await lazyEnsureCdp()
-        await invoke<string>('cdp_parse_kuaishou_homepage', { userId })
+        const ksPool = await getPlatformCookiePool('kuaishou')
+        await invoke<string>('api_parse_kuaishou_homepage', { userId, cookies: ksPool[0].cookies })
         if (cdpItemCount === 0) throw new Error('该用户主页未找到视频数据')
         successCount += cdpItemCount
       } else if (platform === 'kuaishou') {
         const photoId = extractVideoId('kuaishou', resolvedUrl)
-        const pageUrl = `https://www.kuaishou.com/short-video/${photoId}`
         setHint(`第${i + 1}/${lines.length}条 正在解析快手视频...`)
-        await lazyEnsureCdp()
-        const rawData = await invoke<string>('cdp_parse_kuaishou_video', { pageUrl })
-        if (!rawData) throw new Error('快手页面返回空数据')
+        const ksPool = await getPlatformCookiePool('kuaishou')
+        const rawData = await invoke<string>('api_parse_kuaishou_video', { photoId, cookies: ksPool[0].cookies })
+        if (!rawData) throw new Error('API未返回视频数据')
         const apolloState = JSON.parse(rawData) as Record<string, unknown>
         if ((apolloState as Record<string, string>).error) throw new Error((apolloState as Record<string, string>).error)
         const info = parseKuaishouDetail(apolloState, photoId)
@@ -863,19 +1110,42 @@ async function startParse() {
       } else if (urlType === 'homepage' && platform === 'bilibili') {
         const biliMid = extractBilibiliMid(resolvedUrl)
         parseProgress.message = `第${i + 1}/${lines.length}条 正在加载主页...`
+        setHint(`第${i + 1}/${lines.length}条 正在加载B站主页...`)
         cdpItemCount = 0
-        await lazyEnsureCdp()
-        await invoke<string>('cdp_parse_bilibili_homepage', { mid: biliMid })
+        const biliPool = await getPlatformCookiePool('bilibili')
+        await invoke<string>('fetch_bilibili_homepage', { app: undefined, mid: biliMid, cookies: biliPool[0].cookies })
+        if (cdpItemCount === 0) throw new Error('该用户主页未找到视频数据')
+        successCount += cdpItemCount
+      } else if (urlType === 'homepage' && platform === 'migu') {
+        const authorIdMatch = resolvedUrl.match(/authorId=(\d+)/)
+        const authorId = authorIdMatch?.[1]
+        if (!authorId) throw new Error('无法从 URL 中提取咪咕作者ID')
+        parseProgress.message = `第${i + 1}/${lines.length}条 正在加载咪咕主页...`
+        setHint(`第${i + 1}/${lines.length}条 正在加载咪咕主页...`)
+        cdpItemCount = 0
+        const miguPool = await getPlatformCookiePool('migu')
+        await invoke<string>('api_parse_migu_homepage', { authorId, cookies: miguPool[0].cookies })
         if (cdpItemCount === 0) throw new Error('该用户主页未找到视频数据')
         successCount += cdpItemCount
       } else if (platform === 'bilibili') {
         const bvid = extractBilibiliBvid(resolvedUrl)
         setHint(`第${i + 1}/${lines.length}条 正在解析B站视频...`)
-        await lazyEnsureCdp()
-        const rawData = await invoke<string>('cdp_parse_bilibili_video', { bvid })
+        const biliPool = await getPlatformCookiePool('bilibili')
+        const rawData = await invoke<string>('fetch_bilibili_video', { bvid, cookies: biliPool[0].cookies })
         if (!rawData) throw new Error('B站返回空数据')
         const detail = JSON.parse(rawData) as Record<string, unknown>
         upsertItem(parseBilibiliDetail(detail), ''); successCount++
+      } else if (platform === 'migu') {
+        const contentId = extractVideoId('migu', resolvedUrl)
+        setHint(`第${i + 1}/${lines.length}条 正在解析咪咕视频...`)
+        const miguPool = await getPlatformCookiePool('migu')
+        await lazyEnsureCdp()
+        const rawData = await invoke<string>('api_parse_migu_video', { contentId, cookies: miguPool[0].cookies })
+        if (!rawData) throw new Error('咪咕返回空数据')
+        const detail = JSON.parse(rawData) as Record<string, unknown>
+        const info = parseMiguDetail(detail)
+        if (!info.video_url) throw new Error('未能获取到视频播放地址')
+        upsertItem(info, ''); successCount++
       } else if (platform === 'douyin') {
         const videoId = extractVideoId(platform, resolvedUrl)
         setHint(`第${i + 1}/${lines.length}条 正在解析抖音视频...`)
@@ -899,8 +1169,9 @@ async function startParse() {
       parseProgress.success = successCount
     } catch (e: unknown) {
       const msg = typeof e === 'string' ? e : (e as { message?: string })?.message || '解析失败'
+      lastErrorMsg = `第${i + 1}条：${msg}`
       parseProgress.message = `第${i + 1}条解析失败：${msg}`
-      setHint(`第${i + 1}条解析失败：${msg}`)
+      setHint(`第${i + 1}条解析失败：${msg}`, true)
       failCount++
       parseProgress.failed = failCount
       await new Promise(r => setTimeout(r, 500))
@@ -912,7 +1183,11 @@ async function startParse() {
   unlistenChunk()
   unlistenProgress()
   const cancelMsg = parseCancelled.value ? '（已取消）' : ''
-  setHint(`解析完成${cancelMsg}：成功 ${successCount}，失败 ${failCount}`)
+  if (failCount > 0 && lastErrorMsg) {
+    setHint(`解析完成${cancelMsg}：成功 ${successCount}，失败 ${failCount}。${lastErrorMsg}`, true)
+  } else {
+    setHint(`解析完成${cancelMsg}：成功 ${successCount}，失败 ${failCount}`)
+  }
   if (successCount > 0) linkText.value = ''
   parseCancelled.value = false
   activeTab.value = 0
@@ -987,11 +1262,17 @@ async function startBatchDownload() {
           taskIdToItemId.set(tid, item.id)
         }
       } else {
-        if (dlOptions.video && item.video_url && item.video_url !== '无') {
-          const ext = item.video_ext && item.video_ext !== '无' ? item.video_ext : 'mp4'
-          const tid = `v_${item.id}`
-          tasks.push({ url: item.video_url, save_path: `${authorDir}${sep}${seqPrefix}${baseName}.${ext}`, task_id: tid, fallback_urls: item.video_url_fallbacks || [] })
-          taskIdToItemId.set(tid, item.id)
+        if (dlOptions.video) {
+          let videoUrl = item.video_url && item.video_url !== '无' ? item.video_url : ''
+          if (!videoUrl && item.platform === 'MG' && item.video_id) {
+            videoUrl = `migu://resolve/${item.video_id}`
+          }
+          if (videoUrl) {
+            const ext = item.video_ext && item.video_ext !== '无' ? item.video_ext : 'mp4'
+            const tid = `v_${item.id}`
+            tasks.push({ url: videoUrl, save_path: `${authorDir}${sep}${seqPrefix}${baseName}.${ext}`, task_id: tid, fallback_urls: item.video_url_fallbacks || [] })
+            taskIdToItemId.set(tid, item.id)
+          }
         }
         if (dlOptions.cover && item.cover_url && item.cover_url !== '无') {
           const coverExt = 'jpg'
@@ -1022,10 +1303,20 @@ async function startBatchDownload() {
   const doneTaskIds = new Set<string>()
   const failedIds = new Set<string>()
 
+  const unlistenFileProgress = await listen<{ task_id: string; downloaded: number; total: number }>('download-file-progress', (event) => {
+    const { task_id, downloaded, total: fileTotal } = event.payload
+    const itemId = taskIdToItemId.get(task_id)
+    if (!itemId) return
+    const item = allVideos.value.find(v => v.id === itemId)
+    if (!item) return
+    item._status = 'downloading'
+    item._progress = fileTotal > 0 ? Math.round(downloaded / fileTotal * 100) : 0
+    item._file_size = fileTotal
+  })
+
   const unlisten = await listen<DlEvent>('batch-download-progress', (event) => {
     const { task_id, status, bytes } = event.payload
 
-    // 只处理属于本批次的事件
     if (!taskIdToItemId.has(task_id)) return
     if (doneTaskIds.has(task_id)) return
     doneTaskIds.add(task_id)
@@ -1047,6 +1338,7 @@ async function startBatchDownload() {
       const hasFail = allTasksForItem.some(tid => failedIds.has(tid))
       item._status = hasFail ? 'failed' : 'completed'
       if (hasFail) item._error_msg = event.payload.error || '下载失败'
+      else item._progress = 100
     } else {
       item._status = 'downloading'
     }
@@ -1079,6 +1371,7 @@ async function startBatchDownload() {
     }
   } finally {
     unlisten()
+    unlistenFileProgress()
     dlSubmitting.value--
   }
 }
@@ -1111,6 +1404,17 @@ async function retryFailedItems(items: VideoItem[]) {
   const doneTaskIds = new Set<string>()
   const failedIds = new Set<string>()
 
+  const unlistenFileProgress = await listen<{ task_id: string; downloaded: number; total: number }>('download-file-progress', (event) => {
+    const { task_id, downloaded, total: fileTotal } = event.payload
+    const itemId = taskIdToItemId.get(task_id)
+    if (!itemId) return
+    const item = allVideos.value.find(v => v.id === itemId)
+    if (!item) return
+    item._status = 'downloading'
+    item._progress = fileTotal > 0 ? Math.round(downloaded / fileTotal * 100) : 0
+    item._file_size = fileTotal
+  })
+
   const unlisten = await listen<DlEvent>('batch-download-progress', (event) => {
     const { task_id, status, bytes } = event.payload
     if (!taskIdToItemId.has(task_id)) return
@@ -1129,6 +1433,7 @@ async function retryFailedItems(items: VideoItem[]) {
       const hasFail = allTasks.some(tid => failedIds.has(tid))
       item._status = hasFail ? 'failed' : 'completed'
       if (hasFail) item._error_msg = event.payload.error || '下载失败'
+      else item._progress = 100
     } else {
       item._status = 'downloading'
     }
@@ -1140,7 +1445,7 @@ async function retryFailedItems(items: VideoItem[]) {
     for (const item of items) {
       if (item._status === 'queued' || item._status === 'downloading') { item._status = 'failed'; item._error_msg = '下载中断' }
     }
-  } finally { unlisten(); dlSubmitting.value-- }
+  } finally { unlisten(); unlistenFileProgress(); dlSubmitting.value-- }
 }
 
 function retryFailed(item: VideoItem) { retryFailedItems([item]) }
@@ -1226,7 +1531,7 @@ onActivated(() => {
             </div>
           </Transition>
         </div>
-        <span v-if="hintMessage && !isParsing" class="vd-hint-text">{{ hintMessage }}</span>
+        <span v-if="hintMessage && !isParsing" class="vd-hint-text" :class="{ 'vd-hint-error': hintIsError }">{{ hintMessage }}</span>
       </div>
     </section>
 
@@ -1292,7 +1597,7 @@ onActivated(() => {
             <ProgressBar :value="dlProgress.total ? Math.round(dlProgress.completed / dlProgress.total * 100) : 0" :showValue="false" class="vd-progress-bar" />
             <span class="vd-progress-text">
               已完成 {{ dlProgress.completed }} / {{ dlProgress.total }} 个文件，剩余 {{ dlProgress.total - dlProgress.completed }} 个
-              <span v-if="dlSpeed"> · {{ dlSpeed }}</span>
+              <span v-if="dlSpeed" class="vd-speed-badge"> · {{ dlSpeed }}</span>
             </span>
           </div>
 
@@ -1313,10 +1618,15 @@ onActivated(() => {
             <Column field="author_name" header="作者" headerStyle="width: 7rem">
               <template #body="{ data }"><span class="vd-author-tag" :style="{ background: getAuthorColor(data.author_name) + '18', color: getAuthorColor(data.author_name), borderColor: getAuthorColor(data.author_name) + '40' }">{{ data.author_name || '未知' }}</span></template>
             </Column>
-            <Column header="状态" headerStyle="width: 7rem">
+            <Column header="进度" headerStyle="width: 10rem">
               <template #body="{ data }">
-                <span v-if="data._status === 'queued'" style="color: #999">排队中</span>
-                <span v-else style="color: var(--p-primary-color)"><i class="pi pi-spin pi-spinner" /> 下载中</span>
+                <span v-if="data._status === 'queued'" style="color: #999; font-size: 12px">排队中</span>
+                <div v-else class="vd-file-progress">
+                  <div class="vd-file-progress-bar">
+                    <div class="vd-file-progress-fill" :style="{ width: (data._progress || 0) + '%' }"></div>
+                  </div>
+                  <span class="vd-file-progress-text">{{ data._progress || 0 }}%</span>
+                </div>
               </template>
             </Column>
           </DataTable>
@@ -1515,7 +1825,8 @@ onActivated(() => {
 .vd-progress-info { display: flex; align-items: center; gap: 10px; flex: 1; max-width: 400px; }
 .vd-progress-bar { flex: 1; height: 8px; }
 .vd-progress-text { font-size: 0.78rem; color: #64748b; white-space: nowrap; }
-.vd-hint-text { font-size: 0.78rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 400px; }
+.vd-hint-text { font-size: 0.78rem; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 600px; }
+.vd-hint-error { color: #ef4444; font-weight: 600; }
 
 /* ═══ 标签页 ═══ */
 .vd-tabs-section {
@@ -1594,6 +1905,9 @@ onActivated(() => {
 .vd-plat--dy { background: #0f0f0f !important; color: #fff !important; }
 .vd-plat--ks { background: #ff4906 !important; color: #fff !important; }
 .vd-plat--blb { background: #fb7299 !important; color: #fff !important; }
+.vd-plat--mg { background: #e62e2e !important; color: #fff !important; }
+.vd-plat--cctv { background: #c41230 !important; color: #fff !important; }
+.vd-plat--ysp { background: #ff6600 !important; color: #fff !important; }
 
 /* ═══ 作者标签 ═══ */
 .vd-author-tag {
@@ -1608,6 +1922,28 @@ onActivated(() => {
   text-overflow: ellipsis;
   max-width: 120px;
 }
+
+/* ═══ 下载速度渐变 ═══ */
+.vd-speed-badge {
+  font-weight: 700;
+  background: linear-gradient(90deg, #6366f1, #a855f7, #ec4899, #f43f5e);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: vd-speed-gradient 3s ease infinite;
+}
+@keyframes vd-speed-gradient {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+/* ═══ 单文件下载进度 ═══ */
+.vd-file-progress { display: flex; align-items: center; gap: 6px; }
+.vd-file-progress-bar { flex: 1; height: 6px; background: #e2e8f0; border-radius: 3px; overflow: hidden; }
+.vd-file-progress-fill { height: 100%; background: var(--p-primary-color); border-radius: 3px; transition: width 0.3s ease; }
+.vd-file-progress-text { font-size: 12px; color: var(--p-primary-color); font-weight: 600; min-width: 36px; text-align: right; }
 
 /* ═══ 表格线 ═══ */
 .vd-table-grid :deep(.p-datatable-thead > tr > th) { border: 1px solid #e2e8f0 !important; }

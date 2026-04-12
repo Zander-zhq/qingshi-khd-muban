@@ -248,7 +248,7 @@ fn kill_process_tree(pid: u32) {
 const CDP_PORT: u16 = 9224;
 
 
-async fn launch_and_connect(
+pub async fn launch_and_connect(
     app: &tauri::AppHandle,
     session: &mut ChromeSession,
     show_window: bool,

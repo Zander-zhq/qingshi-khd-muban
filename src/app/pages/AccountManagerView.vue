@@ -31,6 +31,7 @@ const PLATFORMS = [
   { value: 'douyin', label: 'DY', url: 'https://www.douyin.com' },
   { value: 'kuaishou', label: 'KS', url: 'https://www.kuaishou.com' },
   { value: 'bilibili', label: 'BLB', url: 'https://www.bilibili.com' },
+  { value: 'migu', label: 'MG', url: 'https://www.miguvideo.com' },
 ]
 
 function platformLabel(p: string) {
@@ -553,6 +554,7 @@ onUnmounted(() => {
 .am-platform--douyin { background: #0f0f0f !important; color: #fff !important; }
 .am-platform--kuaishou { background: #ff4906 !important; color: #fff !important; }
 .am-platform--bilibili { background: #fb7299 !important; color: #fff !important; }
+.am-platform--migu { background: #e62e2e !important; color: #fff !important; }
 
 .am-table-grid :deep(.p-datatable-thead > tr > th) { border: 1px solid #e2e8f0 !important; }
 .am-table-grid :deep(.p-datatable-tbody > tr > td) { border: 1px solid #e2e8f0 !important; }

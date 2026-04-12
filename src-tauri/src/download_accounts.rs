@@ -35,7 +35,7 @@ pub fn list_download_accounts(state: tauri::State<'_, DbState>) -> Result<Vec<Pl
         let mut stmt = conn.prepare(
             "SELECT id, platform, name, avatar, cookies, status, remark, created_at, updated_at
              FROM platform_accounts
-             WHERE platform IN ('douyin', 'kuaishou', 'bilibili')
+             WHERE platform IN ('douyin', 'kuaishou', 'bilibili', 'migu')
              ORDER BY id DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -206,6 +206,9 @@ pub async fn check_download_cookie_status(cookies: String, platform: String) -> 
                 Ok(false)
             }
         }
+        "migu" => {
+            Ok(cookies.contains("checked_token=") || cookies.contains("UserInfo="))
+        }
         _ => Ok(false),
     }
 }
@@ -330,6 +333,8 @@ fn build_login_script(platform: &str) -> String {
             return hasCookie('userId');
         }} else if (PLATFORM === 'bilibili') {{
             return hasCookie('DedeUserID');
+        }} else if (PLATFORM === 'migu') {{
+            return hasCookie('checked_token') || hasCookie('UserInfo');
         }}
         return false;
     }}
@@ -415,6 +420,23 @@ fn build_login_script(platform: &str) -> String {
                 }} else {{ DETECTED = false; }}
             }})
             .catch(function() {{ DETECTED = false; }});
+        }} else if (PLATFORM === 'migu') {{
+            if (!hasCookie('checked_token') && !hasCookie('UserInfo')) return;
+            if (currentCookie === LAST_COOKIE && DETECTED) return;
+            LAST_COOKIE = currentCookie;
+            DETECTED = true;
+            try {{
+                var uiMatch = document.cookie.match(/userInfo=([^;]+)/);
+                if (uiMatch) {{
+                    var info = JSON.parse(decodeURIComponent(uiMatch[1]));
+                    if (info && info.sname) {{
+                        doCallback(info.sname, info.picture || '');
+                        return;
+                    }}
+                }}
+            }} catch(e) {{}}
+            var uidMatch = document.cookie.match(/UserInfo=([^|]+)/);
+            doCallback(uidMatch ? uidMatch[1] : 'migu_user', '');
         }}
     }}
 
@@ -502,6 +524,7 @@ pub async fn open_download_login(
         "douyin" => ("https://www.douyin.com", ".douyin.com"),
         "kuaishou" => ("https://www.kuaishou.com", ".kuaishou.com"),
         "bilibili" => ("https://www.bilibili.com", ".bilibili.com"),
+        "migu" => ("https://www.miguvideo.com", ".miguvideo.com"),
         _ => return Err("不支持的平台".into()),
     };
 

@@ -578,6 +578,287 @@ pub async fn api_find_douyin_mix_id(
     Err(format!("在该用户的 {} 个合集中未找到视频 {}", mix_infos.len(), video_id))
 }
 
+// ── 快手单视频 (纯 API, GraphQL visionVideoDetail) ────────────────
+
+const KS_VIDEO_DETAIL_QUERY: &str = r#"query visionVideoDetail($photoId: String, $page: String) {
+  visionVideoDetail(photoId: $photoId, page: $page) {
+    status
+    type
+    author {
+      id
+      name
+      following
+      headerUrl
+    }
+    photo {
+      id
+      duration
+      caption
+      likeCount
+      realLikeCount
+      coverUrl
+      photoUrl
+      photoH265Url
+      liked
+      timestamp
+      expTag
+      viewCount
+      videoRatio
+      stereoType
+      musicBlocked
+      riskTagContent
+      riskTagUrl
+      manifest {
+        mediaType
+        businessType
+        version
+        adaptationSet {
+          id
+          duration
+          representation {
+            id
+            defaultSelect
+            backupUrl
+            codecs
+            url
+            height
+            width
+            avgBitrate
+            maxBitrate
+            m3u8Slice
+            qualityType
+            qualityLabel
+            frameRate
+            featureP2sp
+            hidden
+            disableAdaptive
+          }
+        }
+      }
+      manifestH265
+      videoResource
+    }
+    tags {
+      type
+      name
+    }
+    commentLimit {
+      canAddComment
+    }
+    llsid
+    danmakuSwitch
+  }
+}"#;
+
+#[tauri::command]
+pub async fn api_parse_kuaishou_video(
+    app: tauri::AppHandle,
+    photo_id: String,
+    cookies: String,
+) -> Result<String, String> {
+    eprintln!("[快手单视频] photoId={}", photo_id);
+
+    let _ = app.emit("cdp-parse-progress", serde_json::json!({
+        "message": "正在解析快手视频...",
+    }));
+
+    let client = build_ks_client()
+        .map_err(|e| format!("HTTP客户端创建失败: {}", e))?;
+
+    let query = serde_json::json!({
+        "operationName": "visionVideoDetail",
+        "variables": { "photoId": photo_id, "page": "detail" },
+        "query": KS_VIDEO_DETAIL_QUERY
+    });
+
+    let data = ks_graphql_post(&client, &query, &cookies).await?;
+
+    let detail = data.get("visionVideoDetail")
+        .ok_or("GraphQL返回无visionVideoDetail字段")?;
+
+    let status = detail.get("status").and_then(|s| s.as_i64()).unwrap_or(0);
+    if status != 1 {
+        return Err(format!("视频不可用 (status={})", status));
+    }
+
+    let author = detail.get("author").cloned().unwrap_or(serde_json::json!({}));
+    let mut photo = detail.get("photo").cloned().unwrap_or(serde_json::json!({}));
+    let author_id = author.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if let Some(photo_obj) = photo.as_object_mut() {
+        if let Some(vr) = photo_obj.remove("videoResource") {
+            let inner = if vr.is_string() {
+                serde_json::from_str::<serde_json::Value>(vr.as_str().unwrap_or("{}"))
+                    .unwrap_or(vr)
+            } else {
+                vr
+            };
+            photo_obj.insert(
+                "videoResource".to_string(),
+                serde_json::json!({ "type": "json", "json": inner }),
+            );
+        }
+    }
+
+    let mut dc = serde_json::Map::new();
+    dc.insert(format!("VisionVideoDetailAuthor:{}", author_id), author);
+    dc.insert(format!("VisionVideoDetailPhoto:{}", photo_id), photo.clone());
+
+    if !author_id.is_empty() {
+        if let Some(profile) = ks_fetch_profile(&client, &author_id, &cookies).await {
+            dc.insert("__kuaishou_profile__".to_string(), profile);
+        }
+    }
+
+    if let Some(cover_url) = photo.get("coverUrl").and_then(|u| u.as_str()) {
+        if let Ok(reqwest_client) = build_http_client() {
+            if let Some((w, h)) = fetch_jpeg_dimensions(&reqwest_client, cover_url).await {
+                dc.insert("__cover_width__".to_string(), serde_json::json!(w));
+                dc.insert("__cover_height__".to_string(), serde_json::json!(h));
+            }
+        }
+    }
+
+    let apollo_state = serde_json::json!({ "defaultClient": dc });
+
+    eprintln!("[快手单视频] 解析成功, photoId={}", photo_id);
+
+    Ok(apollo_state.to_string())
+}
+
+// ── 快手主页 (纯 API, REST /rest/v/profile/feed) ──────────────────
+
+#[tauri::command]
+pub async fn api_parse_kuaishou_homepage(
+    app: tauri::AppHandle,
+    user_id: String,
+    cookies: String,
+) -> Result<String, String> {
+    let client = build_ks_client()
+        .map_err(|e| format!("HTTP客户端创建失败: {}", e))?;
+
+    let mut all_count: usize = 0;
+    let mut seen_ids: HashSet<String> = HashSet::new();
+    let mut pcursor = String::new();
+    let mut page: usize = 0;
+    let mut empty_pages: usize = 0;
+
+    eprintln!("[快手主页] 开始解析, user_id={}", user_id);
+
+    let _ = app.emit("cdp-parse-progress", serde_json::json!({
+        "message": "正在加载快手主页...",
+    }));
+
+    loop {
+        page += 1;
+        if page > 500 { break; }
+
+        let body = serde_json::json!({
+            "user_id": user_id,
+            "pcursor": pcursor,
+            "page": "profile"
+        });
+
+        eprintln!("[快手主页] 第{}页, pcursor={}", page, if pcursor.is_empty() { "(初始)" } else { &pcursor });
+
+        let resp = client
+            .post("https://www.kuaishou.com/rest/v/profile/feed")
+            .header("User-Agent", UA)
+            .header("Referer", format!("https://www.kuaishou.com/profile/{}", user_id))
+            .header("Origin", "https://www.kuaishou.com")
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+            .header("Content-Type", "application/json")
+            .header("Cookie", &cookies)
+            .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", r#""Windows""#)
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "same-origin")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| {
+                eprintln!("[快手主页] HTTP请求失败: {}", e);
+                format!("HTTP请求失败: {}", e)
+            })?;
+
+        let text = resp.text().await
+            .map_err(|e| format!("读取响应失败: {}", e))?;
+
+        if text.is_empty() {
+            empty_pages += 1;
+            if empty_pages >= 3 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        }
+
+        let data: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("JSON解析失败: {}", e))?;
+
+        let result = data.get("result").and_then(|v| v.as_i64()).unwrap_or(0);
+        if result != 1 {
+            let err_msg = data.get("error_msg").and_then(|v| v.as_str()).unwrap_or("未知错误");
+            return Err(format!("快手返回错误 (result={}): {}", result, err_msg));
+        }
+
+        let feeds = data.get("feeds").and_then(|v| v.as_array());
+        let mut new_items: Vec<serde_json::Value> = Vec::new();
+
+        if let Some(list) = feeds {
+            for item in list {
+                let id_opt = item
+                    .get("photo").and_then(|p| p.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(id) = id_opt {
+                    if seen_ids.insert(id) {
+                        new_items.push(item.clone());
+                    }
+                }
+            }
+        }
+
+        if new_items.is_empty() {
+            empty_pages += 1;
+            if empty_pages >= 3 { break; }
+        } else {
+            empty_pages = 0;
+            all_count += new_items.len();
+            let _ = app.emit("cdp-parse-chunk", serde_json::json!({
+                "platform": "kuaishou",
+                "type": "homepage",
+                "items": &new_items,
+            }));
+            let _ = app.emit("cdp-parse-progress", serde_json::json!({
+                "message": format!("已加载 {} 个作品（第{}页）", all_count, page),
+            }));
+        }
+
+        let next_cursor = data.get("pcursor")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if next_cursor.is_empty() || next_cursor == "no_more" { break; }
+        pcursor = next_cursor;
+
+        let delay = random_delay_ms(300, 800);
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
+
+    let _ = app.emit("cdp-parse-done", serde_json::json!({
+        "platform": "kuaishou",
+        "type": "homepage",
+        "total": all_count,
+    }));
+
+    eprintln!("[快手主页] 解析完成, 共{}个作品", all_count);
+
+    Ok(serde_json::json!({"total": all_count}).to_string())
+}
+
 // ── 快手 rquest 客户端 (TLS 指纹模拟) ─────────────────────────────
 
 fn build_ks_client() -> Result<rquest::Client, String> {
@@ -679,995 +960,632 @@ async fn ks_fetch_profile(
     Some(profile)
 }
 
-// ── 快手 Cookie 合并 ──────────────────────────────────────────────
-
-fn merge_set_cookies(original: &str, resp_headers: &rquest::header::HeaderMap) -> String {
-    let mut map = BTreeMap::<String, String>::new();
-    for segment in original.split(';') {
-        let s = segment.trim();
-        if let Some(idx) = s.find('=') {
-            let name = s[..idx].trim().to_string();
-            let value = s[idx + 1..].trim().to_string();
-            if !name.is_empty() {
-                map.insert(name, value);
-            }
-        }
-    }
-    for val in resp_headers.get_all(rquest::header::SET_COOKIE).iter() {
-        if let Ok(sc) = val.to_str() {
-            let first_part = sc.split(';').next().unwrap_or_default().trim();
-            if let Some(idx) = first_part.find('=') {
-                let name = first_part[..idx].trim().to_string();
-                let value = first_part[idx + 1..].trim().to_string();
-                if !name.is_empty() {
-                    map.insert(name, value);
-                }
-            }
-        }
-    }
-    map.iter().map(|(k, v)| format!("{}={}", k, v)).collect::<Vec<_>>().join("; ")
-}
-
-async fn ks_warmup_live_cookies(
-    client: &rquest::Client,
-    principal_id: &str,
-    cookies: &str,
-) -> String {
-    let profile_url = format!("https://live.kuaishou.com/profile/{}", principal_id);
-    match client
-        .get(&profile_url)
-        .header("User-Agent", UA)
-        .header("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
-        .header("Accept-Language", "zh-CN,zh;q=0.9")
-        .header("Cookie", cookies)
-        .header("sec-fetch-dest", "document")
-        .header("sec-fetch-mode", "navigate")
-        .header("sec-fetch-site", "none")
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            let merged = merge_set_cookies(cookies, resp.headers());
-            log::info!("[KS-API] warmup done, cookies {} → {} chars", cookies.len(), merged.len());
-            merged
-        }
-        Err(e) => {
-            log::warn!("[KS-API] warmup failed: {}, using original cookies", e);
-            cookies.to_string()
-        }
-    }
-}
-
-// ── 快手主页 API (三阶段回退) ─────────────────────────────────────
+// ── 咪咕单视频 (API元信息 + CDP拦截m3u8) ──────────────────────────
 
 #[tauri::command]
-pub async fn fetch_kuaishou_homepage_api(
+pub async fn api_parse_migu_video(
     app: tauri::AppHandle,
-    principal_id: String,
-    cookies_list: Vec<String>,
-) -> ParseResult<String> {
-    use serde_json::json;
-
-    if cookies_list.is_empty() {
-        return Err(ParseError::Internal("快手 Cookie 池为空".into()));
-    }
-
-    let max_pages = 2500usize;
-
-    let _ = app.emit("parse-debug-log", format!(
-        "[快手] principalId={}, Cookie池={}个", principal_id, cookies_list.len()
-    ));
-
-    let ks_client = build_ks_client()
-        .map_err(|e| ParseError::Internal(e))?;
-
-    // ═══════════════════════════════════════════════════════════════
-    // Phase 1 (首选): live_api 拿列表 + GraphQL visionVideoDetail 补全
-    // ═══════════════════════════════════════════════════════════════
-    let _ = app.emit("parse-debug-log", "[快手] Phase1: live_api 列表 + GraphQL 补全...".to_string());
-
-    let mut live_cookies: Vec<String> = cookies_list.iter()
-        .map(|c| c.replace("kpn=KUAISHOU_VISION", "kpn=GAME_ZONE"))
-        .collect();
-
-    let _ = app.emit("parse-debug-log", format!(
-        "[快手] Cookie 预热中 ({}个)...", live_cookies.len()
-    ));
-    for i in 0..live_cookies.len() {
-        live_cookies[i] = ks_warmup_live_cookies(&ks_client, &principal_id, &live_cookies[i]).await;
-        if i + 1 < live_cookies.len() {
-            tokio::time::sleep(std::time::Duration::from_millis(random_delay_ms(500, 1000))).await;
-        }
-    }
-    let _ = app.emit("parse-debug-log", "[快手] Cookie 预热完成".to_string());
-
-    let referer = format!("https://live.kuaishou.com/profile/{}", principal_id);
-
-    let mut all_items: Vec<serde_json::Value> = Vec::new();
-    let mut seen_ids = HashSet::new();
-    let mut pcursor: Option<String> = None;
-    let mut live_cookie_idx: usize = 0;
-    let mut enrich_cookie_idx: usize = 0;
-    let mut pages: usize = 0;
-    let mut consecutive_r2: usize = 0;
-    let max_r2 = 3 * live_cookies.len();
-    let mut _live_api_ok = false;
-
-    while pages < max_pages {
-        let ci = live_cookie_idx % live_cookies.len();
-        let cookie = &live_cookies[ci];
-
-        let mut url = format!(
-            "https://live.kuaishou.com/live_api/profile/public?principalId={}&count=12&privacy=public&caver=2&hasMore=true",
-            urlencoding::encode(&principal_id),
-        );
-        if let Some(ref cur) = pcursor {
-            url.push_str(&format!("&pcursor={}", urlencoding::encode(cur)));
-        }
-
-        let resp = ks_client
-            .get(&url)
-            .header("User-Agent", UA)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Accept-Language", "zh-CN,zh;q=0.9")
-            .header("Referer", &referer)
-            .header("Origin", "https://live.kuaishou.com")
-            .header("Cookie", cookie.as_str())
-            .header("sec-fetch-dest", "empty")
-            .header("sec-fetch-mode", "cors")
-            .header("sec-fetch-site", "same-origin")
-            .send()
-            .await;
-
-        let resp = match resp {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = app.emit("parse-debug-log", format!(
-                    "[快手] live_api 请求失败: {}, 切换到Phase2", e
-                ));
-                break;
-            }
-        };
-
-        let resp_headers = resp.headers().clone();
-
-        let body: serde_json::Value = match resp.json().await {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = app.emit("parse-debug-log", format!(
-                    "[快手] live_api JSON解析失败: {}, 切换到Phase2", e
-                ));
-                break;
-            }
-        };
-
-        live_cookies[ci] = merge_set_cookies(&live_cookies[ci], &resp_headers);
-
-        let data_result = body.pointer("/data/result").and_then(|v| v.as_i64()).unwrap_or(-1);
-        let list_len = body.pointer("/data/list").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-        let _ = app.emit("parse-debug-log", format!(
-            "[快手] live_api 第{}页 cookie#{} result={} 返回{}条", pages + 1, ci, data_result, list_len
-        ));
-
-        if data_result == 2 {
-            consecutive_r2 += 1;
-            let _ = app.emit("parse-debug-log", format!(
-                "[快手] live_api 被限流! 连续失败{}/{}", consecutive_r2, max_r2
-            ));
-            if consecutive_r2 >= max_r2 {
-                let _ = app.emit("ks-parse-progress", json!({
-                    "total": all_items.len(), "error": "所有Cookie均被限流"
-                }));
-                break;
-            }
-            let old_idx = live_cookie_idx;
-            live_cookie_idx = (live_cookie_idx + 1) % live_cookies.len();
-            let _ = app.emit("ks-parse-progress", json!({
-                "total": all_items.len(), "cookie_switch": true, "from": old_idx, "to": live_cookie_idx
-            }));
-            tokio::time::sleep(std::time::Duration::from_millis(random_delay_ms(8000, 15000))).await;
-            continue;
-        }
-        consecutive_r2 = 0;
-
-        let list = match body.pointer("/data/list").and_then(|v| v.as_array()) {
-            Some(l) if !l.is_empty() => l,
-            _ => break,
-        };
-
-        let mut new_items: Vec<serde_json::Value> = Vec::new();
-        for item in list {
-            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            if id.is_empty() || seen_ids.contains(&id) { continue; }
-            let play_url = item.get("playUrl").and_then(|v| v.as_str()).unwrap_or_default();
-            if play_url.starts_with("http") {
-                seen_ids.insert(id);
-                new_items.push(item.clone());
-            }
-        }
-
-        if !new_items.is_empty() {
-            _live_api_ok = true;
-            ks_enrich_video_details(
-                &app, &ks_client, &mut new_items, &cookies_list, &mut enrich_cookie_idx,
-            ).await;
-            let _ = app.emit("ks-parse-chunk", json!({ "items": new_items }));
-            all_items.extend(new_items.into_iter());
-        }
-
-        pages += 1;
-        let _ = app.emit("ks-parse-progress", json!({ "total": all_items.len(), "pages": pages }));
-
-        let next = body.pointer("/data/pcursor").and_then(|v| v.as_str()).map(|s| s.to_string());
-        match next {
-            Some(ref c) if !c.is_empty() && Some(c.clone()) != pcursor => { pcursor = Some(c.clone()); }
-            _ => break,
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(random_delay_ms(100, 300))).await;
-    }
-
-    if !all_items.is_empty() {
-        let _ = app.emit("parse-debug-log", format!(
-            "[快手] 完成: live_api+补全 共{}个视频, {}页", all_items.len(), pages
-        ));
-        return serde_json::to_string(&all_items)
-            .map_err(|e| ParseError::Internal(format!("序列化失败: {}", e)));
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Phase 2 (备选): GraphQL visionProfilePhotoList 列表
-    // ═══════════════════════════════════════════════════════════════
-    let _ = app.emit("parse-debug-log", "[快手] Phase1未获取到数据, 尝试Phase2: GraphQL 列表...".to_string());
-    let profile_info = ks_fetch_profile(&ks_client, &principal_id, &cookies_list[0]).await;
-    let mut gql_cookies = cookies_list.clone();
-    let gql_result = ks_fetch_homepage_graphql(
-        &app, &ks_client, &principal_id, &mut gql_cookies, max_pages, &profile_info,
-    ).await;
-    match &gql_result {
-        Ok(items) if !items.is_empty() => {
-            return serde_json::to_string(items)
-                .map_err(|e| ParseError::Internal(format!("序列化失败: {}", e)));
-        }
-        _ => {}
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Phase 3 (兜底): WebView 滚动加载
-    // ═══════════════════════════════════════════════════════════════
-    let _ = app.emit("parse-debug-log", "[快手] Phase2也失败, 尝试Phase3: WebView 兜底...".to_string());
-    let ks_page_url = format!("https://www.kuaishou.com/profile/{}", principal_id);
-    let webview_result = fetch_kuaishou_homepage(
-        app.clone(), ks_page_url, cookies_list[0].clone(),
-    ).await;
-    match webview_result {
-        Ok(data) => {
-            if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&data) {
-                if !items.is_empty() { return Ok(data); }
-            }
-        }
-        Err(_) => {}
-    }
-
-    Err(ParseError::Internal("快手所有解析方案均未获取到数据".into()))
-}
-
-// ── 快手 GraphQL 单视频详情补全 ──────────────────────────────────────
-
-async fn ks_enrich_video_details(
-    app: &tauri::AppHandle,
-    client: &rquest::Client,
-    items: &mut Vec<serde_json::Value>,
-    cookies: &[String],
-    cookie_idx: &mut usize,
-) {
-    let mut total_enriched = 0usize;
-    let mut total_give_up = 0usize;
-    let max_retries_per_video = 3usize;
-
-    for item in items.iter_mut() {
-        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        if id.is_empty() { continue; }
-
-        let page_url = format!("https://www.kuaishou.com/short-video/{}", id);
-        let mut enriched = false;
-
-        for attempt in 0..max_retries_per_video {
-            if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    random_delay_ms(1000, 2500)
-                )).await;
-            }
-
-            let cookie_str = if cookies.is_empty() {
-                String::new()
-            } else {
-                let ci = (*cookie_idx + attempt) % cookies.len();
-                cookies[ci].clone()
-            };
-
-            let mut req = client
-                .get(&page_url)
-                .header("User-Agent", UA)
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-                .header("Referer", "https://www.kuaishou.com/")
-                .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
-                .header("sec-ch-ua-mobile", "?0")
-                .header("sec-ch-ua-platform", r#""Windows""#)
-                .header("sec-fetch-dest", "document")
-                .header("sec-fetch-mode", "navigate")
-                .header("sec-fetch-site", "same-origin")
-                .header("Upgrade-Insecure-Requests", "1");
-
-            if !cookie_str.is_empty() {
-                req = req.header("Cookie", cookie_str.as_str());
-            }
-
-            let resp = req.send().await;
-
-            let html = match resp {
-                Ok(r) => match r.text().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let _ = app.emit("parse-debug-log", format!(
-                            "[快手补全] id={} 第{}次读取失败: {}", id, attempt + 1, e
-                        ));
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    let _ = app.emit("parse-debug-log", format!(
-                        "[快手补全] id={} 第{}次请求失败: {}", id, attempt + 1, e
-                    ));
-                    continue;
-                }
-            };
-
-            let marker = "window.__APOLLO_STATE__=";
-            let apollo = match html.find(marker) {
-                Some(start) => {
-                    let json_start = start + marker.len();
-                    let rest = &html[json_start..];
-                    let mut depth = 0i32;
-                    let mut end = 0usize;
-                    for (i, ch) in rest.char_indices() {
-                        match ch {
-                            '{' | '[' => depth += 1,
-                            '}' | ']' => {
-                                depth -= 1;
-                                if depth == 0 { end = i + 1; break; }
-                            }
-                            _ => {}
-                        }
-                    }
-                    if end == 0 { continue; }
-                    match serde_json::from_str::<serde_json::Value>(&rest[..end]) {
-                        Ok(v) => v,
-                        Err(_) => { continue; }
-                    }
-                }
-                None => {
-                    if attempt + 1 < max_retries_per_video {
-                        let _ = app.emit("parse-debug-log", format!(
-                            "[快手补全] id={} 第{}次无数据, 重试中...", id, attempt + 1
-                        ));
-                    }
-                    continue;
-                }
-            };
-
-            if let Some(dc) = apollo.get("defaultClient").and_then(|c| c.as_object()) {
-                let photo = dc.keys()
-                    .find(|k| k.starts_with("VisionVideoDetailPhoto:"))
-                    .and_then(|k| dc.get(k));
-
-                if let Some(photo) = photo {
-                    if let Some(obj) = item.as_object_mut() {
-                        if let Some(v) = photo.get("caption") { obj.insert("__caption__".into(), v.clone()); }
-                        if let Some(v) = photo.get("duration") { obj.insert("__duration__".into(), v.clone()); }
-                        if let Some(v) = photo.get("timestamp") { obj.insert("__timestamp__".into(), v.clone()); }
-                        if let Some(v) = photo.get("videoRatio") { obj.insert("__videoRatio__".into(), v.clone()); }
-                        if let Some(v) = photo.get("realLikeCount").or_else(|| photo.get("likeCount")) {
-                            obj.insert("__likeCount__".into(), v.clone());
-                        }
-                        if let Some(v) = photo.get("viewCount") { obj.insert("__viewCount__".into(), v.clone()); }
-                        if let Some(v) = photo.get("coverUrl") { obj.insert("__coverUrl__".into(), v.clone()); }
-                        if let Some(v) = photo.get("photoUrl") { obj.insert("__photoUrl__".into(), v.clone()); }
-                    }
-                    enriched = true;
-                    break;
-                }
-            }
-        }
-
-        if enriched {
-            total_enriched += 1;
-        } else {
-            total_give_up += 1;
-            let _ = app.emit("parse-debug-log", format!(
-                "[快手补全] id={} {}次尝试均失败, 跳过", id, max_retries_per_video
-            ));
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(random_delay_ms(50, 200))).await;
-    }
-
-    let _ = app.emit("parse-debug-log", format!(
-        "[快手补全] 完成: 补全{}/{}条, 跳过{}条", total_enriched, items.len(), total_give_up
-    ));
-}
-
-// ── 快手 GraphQL 主页 ─────────────────────────────────────────────
-
-async fn ks_fetch_homepage_graphql(
-    app: &tauri::AppHandle,
-    client: &rquest::Client,
-    principal_id: &str,
-    cookies: &mut Vec<String>,
-    max_pages: usize,
-    profile_info: &Option<serde_json::Value>,
-) -> Result<Vec<serde_json::Value>, String> {
-    use serde_json::json;
-
-    let gql = "query visionProfilePhotoList($userId:String,$pcursor:String,$page:String){visionProfilePhotoList(userId:$userId,pcursor:$pcursor,page:$page){result pcursor feeds{photo{...on PhotoEntity{id duration caption coverUrl photoUrl likeCount realLikeCount viewCount timestamp videoRatio}}}}}";
-
-    let mut all_items: Vec<serde_json::Value> = Vec::new();
-    let mut seen_ids = HashSet::new();
-    let mut pcursor = String::new();
-    let mut cookie_idx: usize = 0;
-    let mut pages: usize = 0;
-    let mut consecutive_fail: usize = 0;
-    let max_fail = 3 * cookies.len();
-
-    while pages < max_pages {
-        let ci = cookie_idx % cookies.len();
-        let cookie = cookies[ci].clone();
-
-        let query = json!({
-            "operationName": "visionProfilePhotoList",
-            "query": gql,
-            "variables": { "userId": principal_id, "pcursor": pcursor, "page": "profile" }
-        });
-
-        let result = ks_graphql_post(client, &query, &cookie).await;
-        let data = match result {
-            Ok(d) => d,
-            Err(e) => {
-                let _ = app.emit("parse-debug-log", format!("[快手GQL] 第{}页 cookie#{} 请求失败: {}", pages + 1, ci, e));
-                consecutive_fail += 1;
-                if consecutive_fail >= max_fail { return Err("GraphQL 认证失败".into()); }
-                cookie_idx = (cookie_idx + 1) % cookies.len();
-                let _ = app.emit("ks-parse-progress", json!({
-                    "total": all_items.len(), "cookie_switch": true
-                }));
-                tokio::time::sleep(std::time::Duration::from_millis(random_delay_ms(8000, 15000))).await;
-                continue;
-            }
-        };
-
-        let list_data = data.get("visionProfilePhotoList");
-        let result_code = list_data.and_then(|d| d.get("result")).and_then(|v| v.as_i64()).unwrap_or(-1);
-
-        if result_code != 1 {
-            let _ = app.emit("parse-debug-log", format!("[快手GQL] 第{}页 cookie#{} result={} (非1=失败)", pages + 1, ci, result_code));
-            consecutive_fail += 1;
-            if consecutive_fail >= max_fail { return Err(format!("GraphQL result={}", result_code)); }
-            cookie_idx = (cookie_idx + 1) % cookies.len();
-            let _ = app.emit("ks-parse-progress", json!({
-                "total": all_items.len(), "cookie_switch": true
-            }));
-            tokio::time::sleep(std::time::Duration::from_millis(random_delay_ms(8000, 15000))).await;
-            continue;
-        }
-        consecutive_fail = 0;
-
-        let feeds = list_data
-            .and_then(|d| d.get("feeds"))
-            .and_then(|f| f.as_array());
-        let feeds = match feeds {
-            Some(f) => f,
-            None => break,
-        };
-
-        if feeds.is_empty() { break; }
-
-        let mut new_items: Vec<serde_json::Value> = Vec::new();
-        for feed in feeds {
-            if let Some(mut photo) = feed.get("photo").cloned() {
-                let id = photo.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                if id.is_empty() || seen_ids.contains(&id) { continue; }
-                if let Some(ref pi) = profile_info {
-                    photo.as_object_mut().map(|o| o.insert("__kuaishou_profile__".to_string(), pi.clone()));
-                }
-                seen_ids.insert(id);
-                new_items.push(photo);
-            }
-        }
-
-        all_items.extend(new_items.iter().cloned());
-        pages += 1;
-        if !new_items.is_empty() {
-            let _ = app.emit("ks-parse-chunk", json!({ "items": new_items }));
-        }
-        let _ = app.emit("ks-parse-progress", json!({ "total": all_items.len(), "pages": pages }));
-
-        if new_items.is_empty() { break; }
-
-        let next = list_data
-            .and_then(|d| d.get("pcursor"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-
-        if next.is_empty() || next == pcursor { break; }
-        pcursor = next;
-
-        human_like_sleep(pages).await;
-    }
-
-    Ok(all_items)
-}
-
-// ── 快手 live_api 主页 ────────────────────────────────────────────
-
-#[allow(dead_code)]
-async fn ks_fetch_homepage_live_api(
-    app: &tauri::AppHandle,
-    client: &reqwest::Client,
-    principal_id: &str,
-    cookies: &mut Vec<String>,
-    max_pages: usize,
-    profile_info: &Option<serde_json::Value>,
-) -> ParseResult<Vec<serde_json::Value>> {
-    use serde_json::json;
-
-    let referer = format!("https://live.kuaishou.com/profile/{}", principal_id);
-    let mut all_items: Vec<serde_json::Value> = Vec::new();
-    let mut seen_ids = HashSet::new();
-    let mut pcursor: Option<String> = None;
-    let mut cookie_idx: usize = 0;
-    let mut pages: usize = 0;
-    let mut consecutive_r2: usize = 0;
-    let max_r2 = 3 * cookies.len();
-
-    while pages < max_pages {
-        let ci = cookie_idx % cookies.len();
-        let cookie = cookies[ci].clone();
-
-        let mut url = format!(
-            "https://live.kuaishou.com/live_api/profile/public?principalId={}&count=12",
-            urlencoding::encode(principal_id),
-        );
-        if let Some(ref cur) = pcursor {
-            url.push_str(&format!("&pcursor={}", urlencoding::encode(cur)));
-        }
-
-        let resp = client
-            .get(&url)
-            .header("User-Agent", UA)
-            .header("Accept", "application/json, text/plain, */*")
-            .header("Accept-Language", "zh-CN,zh;q=0.9")
-            .header("Referer", &referer)
-            .header("Origin", "https://live.kuaishou.com")
-            .header("Cookie", cookie.as_str())
-            .header("sec-fetch-dest", "empty")
-            .header("sec-fetch-mode", "cors")
-            .header("sec-fetch-site", "same-origin")
-            .send()
-            .await
-            .map_err(|e| ParseError::Internal(format!("快手API请求失败: {}", e)))?;
-
-        let body: serde_json::Value = resp.json().await
-            .map_err(|e| ParseError::Internal(format!("快手API JSON解析失败: {}", e)))?;
-
-        let data_result = body.pointer("/data/result").and_then(|v| v.as_i64()).unwrap_or(-1);
-        let list_len = body.pointer("/data/list").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-        let _ = app.emit("parse-debug-log", format!("[快手live] 第{}页 cookie#{} result={} 返回{}条", pages + 1, ci, data_result, list_len));
-        if data_result == 2 {
-            consecutive_r2 += 1;
-            let _ = app.emit("parse-debug-log", format!("[快手live] 被限流! 连续失败{}/{}", consecutive_r2, max_r2));
-            if consecutive_r2 >= max_r2 {
-                let _ = app.emit("ks-parse-progress", json!({ "total": all_items.len(), "error": "所有Cookie均被限流" }));
-                break;
-            }
-            cookie_idx = (cookie_idx + 1) % cookies.len();
-            let _ = app.emit("ks-parse-progress", json!({ "total": all_items.len(), "cookie_switch": true }));
-            tokio::time::sleep(std::time::Duration::from_millis(random_delay_ms(8000, 15000))).await;
-            continue;
-        }
-        consecutive_r2 = 0;
-
-        let list = match body.pointer("/data/list").and_then(|v| v.as_array()) {
-            Some(l) if !l.is_empty() => l,
-            _ => break,
-        };
-
-        let mut new_count = 0usize;
-        for item in list {
-            let id = item.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            if id.is_empty() || seen_ids.contains(&id) { continue; }
-            let play_url = item.get("playUrl").and_then(|v| v.as_str()).unwrap_or_default();
-            if play_url.starts_with("http") {
-                let mut item_clone = item.clone();
-                if let Some(ref pi) = profile_info {
-                    item_clone.as_object_mut().map(|o| o.insert("__kuaishou_profile__".to_string(), pi.clone()));
-                }
-                seen_ids.insert(id);
-                all_items.push(item_clone);
-                new_count += 1;
-            }
-        }
-
-        pages += 1;
-        let _ = app.emit("ks-parse-progress", json!({ "total": all_items.len(), "pages": pages }));
-        if new_count == 0 { break; }
-
-        let next = body.pointer("/data/pcursor").and_then(|v| v.as_str()).map(|s| s.to_string());
-        match next {
-            Some(ref c) if !c.is_empty() && Some(c.clone()) != pcursor => { pcursor = Some(c.clone()); }
-            _ => break,
-        }
-
-        human_like_sleep(pages).await;
-    }
-
-    Ok(all_items)
-}
-
-// ── 快手 WebView 滚动加载主页 ─────────────────────────────────────
-
-#[tauri::command]
-pub async fn fetch_kuaishou_homepage(
-    app: tauri::AppHandle,
-    page_url: String,
+    content_id: String,
     cookies: String,
-) -> ParseResult<String> {
-    let label = format!("ks_hp_{}", chrono::Utc::now().timestamp_millis());
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(16);
+) -> Result<String, String> {
+    use crate::cdp_parse::{ChromeSessionState, inject_cookies, navigate_and_intercept};
 
-    let cookies_escaped = cookies
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "");
+    eprintln!("[咪咕单视频] contentId={}", content_id);
 
-    let init_script = format!(
-        r#"
-(function() {{
-    if (window.__KS_SCROLL_STARTED__) return;
-    window.__KS_SCROLL_STARTED__ = true;
+    let _ = app.emit("cdp-parse-progress", serde_json::json!({
+        "message": "正在解析咪咕视频...",
+    }));
 
-    var USER_ID = (function() {{
-        var m = window.location.pathname.match(/\/profile\/([^/?#]+)/);
-        return m ? m[1] : '';
-    }})();
-    if (!USER_ID) return;
+    let client = build_http_client()
+        .map_err(|e| e.to_string())?;
 
-    var RAW_COOKIES = "{cookies_escaped}";
-
-    if (RAW_COOKIES) {{
-        RAW_COOKIES.split('; ').forEach(function(c) {{
-            if (c.indexOf('=') > 0) {{
-                document.cookie = c + '; domain=.kuaishou.com; path=/';
-            }}
-        }});
-    }}
-
-    var allPhotos = [];
-    var seenIds = {{}};
-    var profileInfo = null;
-    var DONE = false;
-    var noNewScrolls = 0;
-    var scrollCount = 0;
-
-    var SENDING = false;
-    var SEND_QUEUE = [];
-    function sendSignal(params) {{
-        SEND_QUEUE.push(params);
-        if (!SENDING) drainQueue();
-    }}
-    function drainQueue() {{
-        if (SEND_QUEUE.length === 0) {{ SENDING = false; return; }}
-        SENDING = true;
-        var params = SEND_QUEUE.shift();
-        window.location.href = 'https://ks-hp-cb.internal/?' + params;
-        setTimeout(drainQueue, 200);
-    }}
-
-    var _origFetch = window.fetch;
-    window.fetch = function() {{
-        var args = arguments;
-        var url = (typeof args[0] === 'string') ? args[0] : (args[0] && args[0].url) || '';
-        var p = _origFetch.apply(this, args);
-        if (url.indexOf('/graphql') !== -1) {{
-            p.then(function(resp) {{
-                resp.clone().json().then(function(json) {{
-                    try {{
-                        var d = json && json.data;
-                        if (!d) return;
-                        if (d.visionProfile && d.visionProfile.userProfile) {{
-                            profileInfo = d.visionProfile.userProfile;
-                            try {{
-                                var did = extractUserDefineId();
-                                if (did) profileInfo.userDefineId = did;
-                            }} catch(e) {{}}
-                            console.log('[KS滚动] 捕获用户资料');
-                        }}
-                        var pl = d.visionProfilePhotoList;
-                        if (!pl || !pl.feeds) return;
-                        var batch = [];
-                        pl.feeds.forEach(function(f) {{
-                            var photo = f && f.photo;
-                            if (photo && photo.id && !seenIds[photo.id]) {{
-                                seenIds[photo.id] = true;
-                                if (profileInfo) photo.__kuaishou_profile__ = profileInfo;
-                                allPhotos.push(photo);
-                                batch.push(photo);
-                            }}
-                        }});
-                        if (batch.length > 0) {{
-                            noNewScrolls = 0;
-                            console.log('[KS滚动] 拦截到 ' + batch.length + ' 个新视频, 累计 ' + allPhotos.length);
-                            sendSignal('status=chunk&data=' + encodeURIComponent(JSON.stringify(batch)));
-                        }}
-                    }} catch(e) {{}}
-                }}).catch(function() {{}});
-            }}).catch(function() {{}});
-        }}
-        return p;
-    }};
-
-    function extractUserDefineId() {{
-        try {{
-            var scripts = document.querySelectorAll('script');
-            for (var i = 0; i < scripts.length; i++) {{
-                var text = scripts[i].textContent || '';
-                var idx = text.indexOf('"userDefineId":"');
-                if (idx !== -1) {{
-                    var start = idx + '"userDefineId":"'.length;
-                    var end = text.indexOf('"', start);
-                    if (end !== -1) return text.substring(start, end);
-                }}
-            }}
-        }} catch(e) {{}}
-        return '';
-    }}
-
-    function doScroll() {{
-        if (DONE) return;
-        scrollCount++;
-        var h = 500 + Math.floor(Math.random() * 500);
-        window.scrollBy({{ top: h, behavior: 'smooth' }});
-        console.log('[KS滚动] 第' + scrollCount + '次滚动 ' + h + 'px, 累计 ' + allPhotos.length + ' 个视频');
-
-        var prevCount = allPhotos.length;
-        setTimeout(function() {{
-            if (DONE) return;
-            if (allPhotos.length === prevCount) {{
-                noNewScrolls++;
-            }} else {{
-                noNewScrolls = 0;
-            }}
-            if (noNewScrolls >= 5) {{
-                DONE = true;
-                console.log('[KS滚动] 连续5次滚动无新数据, 完成! 共 ' + allPhotos.length + ' 个视频');
-                sendSignal('status=done&data=' + allPhotos.length);
-                return;
-            }}
-            scheduleNext();
-        }}, 2500);
-    }}
-
-    function scheduleNext() {{
-        var delay = 3000 + Math.floor(Math.random() * 5000);
-        if (scrollCount % 8 === 0) delay += 3000 + Math.floor(Math.random() * 5000);
-        setTimeout(doScroll, delay);
-    }}
-
-    function checkRateLimit() {{
-        try {{
-            var bodyText = (document.body && document.body.innerText) || '';
-            bodyText = bodyText.trim();
-            if (bodyText.indexOf('"result"') !== -1) {{
-                try {{
-                    var obj = JSON.parse(bodyText);
-                    if (obj && obj.result === 2) {{
-                        console.log('[KS滚动] 检测到限流 result=2, 立即退出');
-                        DONE = true;
-                        sendSignal('status=warmup&data=result%3D2');
-                        return true;
-                    }}
-                }} catch(e) {{}}
-            }}
-        }} catch(e) {{}}
-        return false;
-    }}
-
-    function startWhenReady() {{
-        if (document.readyState === 'complete') {{
-            if (checkRateLimit()) return;
-            window.__COOKIES_READY__ = true;
-            console.log('[KS滚动] 页面加载完成, 3秒后开始滚动...');
-            setTimeout(function() {{
-                if (!DONE && checkRateLimit()) return;
-                doScroll();
-            }}, 3000);
-        }} else {{
-            setTimeout(startWhenReady, 500);
-        }}
-    }}
-
-    startWhenReady();
-
-    setTimeout(function() {{
-        if (!DONE) {{
-            DONE = true;
-            console.log('[KS滚动] 超时, 返回已获取的 ' + allPhotos.length + ' 个视频');
-            sendSignal('status=done&data=' + allPhotos.length);
-        }}
-    }}, 600000);
-}})();
-"#,
-        cookies_escaped = cookies_escaped,
+    // 1. 纯 API 获取视频元信息
+    let play_url = format!(
+        "https://v2-sc.miguvideo.com/program/v3/cont/playing-info/{}",
+        content_id
     );
+    let play_resp = client.get(&play_url)
+        .header("User-Agent", UA)
+        .send().await
+        .map_err(|e| format!("获取播放信息失败: {}", e))?;
+    let play_data: serde_json::Value = play_resp.json().await
+        .map_err(|e| format!("解析播放信息失败: {}", e))?;
+    let play = play_data.get("body").unwrap_or(&play_data);
 
-    let _label_for_close = label.clone();
-    let _app_for_close = app.clone();
-    let app_for_progress = app.clone();
+    let content_url = format!(
+        "https://v3-sc.miguvideo.com/program/v4/cont/content-info/{}/1",
+        content_id
+    );
+    let content_resp = client.get(&content_url)
+        .header("User-Agent", UA)
+        .send().await
+        .map_err(|e| format!("获取内容信息失败: {}", e))?;
+    let content_data: serde_json::Value = content_resp.json().await
+        .map_err(|e| format!("解析内容信息失败: {}", e))?;
+    let content = content_data
+        .pointer("/body/data")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
-    let chunks: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let chunks_for_nav = chunks.clone();
-    let running_total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let running_total_nav = running_total.clone();
+    // 获取社交数据（点赞、评论等）
+    let social_resp = client.post("https://webapi.miguvideo.com/gateway/private/social/short-video/find-status-and-info")
+        .header("User-Agent", UA)
+        .header("Content-Type", "application/json")
+        .header("Cookie", &cookies)
+        .json(&serde_json::json!({
+            "requests": [{
+                "contentId": content_id,
+                "contentType": 1,
+                "clientType": 1,
+                "type": "4",
+                "videoPlatForm": "0005",
+                "mId": play.get("assetID").and_then(|v| v.as_str()).unwrap_or("")
+            }]
+        }))
+        .send().await.ok();
 
-    let _window = tauri::WebviewWindowBuilder::new(
-        &app,
-        &label,
-        tauri::WebviewUrl::External(
-            page_url
-                .parse()
-                .map_err(|_| ParseError::Internal("URL解析失败".into()))?,
-        ),
-    )
-    .title(format!("快手主页解析: {}", page_url))
-    .inner_size(1200.0, 800.0)
-    .center()
-    .visible(true)
-    .skip_taskbar(false)
-    .user_agent(UA)
-    .initialization_script(&init_script)
-    .on_navigation(move |nav_url| {
-        if nav_url.host_str() == Some("ks-hp-cb.internal") {
-            let status = nav_url
-                .query_pairs()
-                .find(|(k, _)| k == "status")
-                .map(|(_, v)| v.to_string())
-                .unwrap_or_default();
-            let data = nav_url
-                .query_pairs()
-                .find(|(k, _)| k == "data")
-                .map(|(_, v)| v.to_string())
-                .unwrap_or_default();
-
-            if status == "chunk" {
-                if let Ok(mut guard) = chunks_for_nav.lock() {
-                    let parsed_items = serde_json::from_str::<Vec<serde_json::Value>>(&data)
-                        .unwrap_or_default();
-                    let chunk_len = parsed_items.len();
-                    guard.push(data);
-                    let total = running_total_nav.fetch_add(chunk_len, std::sync::atomic::Ordering::Relaxed) + chunk_len;
-                    if !parsed_items.is_empty() {
-                        let _ = app_for_progress.emit("ks-parse-chunk", serde_json::json!({
-                            "items": parsed_items
-                        }));
-                    }
-                    let _ = app_for_progress.emit("ks-parse-progress", serde_json::json!({
-                        "total": total,
-                    }));
+    let mut like_count: i64 = 0;
+    let mut comment_count: i64 = 0;
+    if let Some(resp) = social_resp {
+        if let Ok(social) = resp.json::<serde_json::Value>().await {
+            if let Some(arr) = social.pointer("/body/responses").and_then(|v| v.as_array()) {
+                if let Some(first) = arr.first() {
+                    like_count = first.get("likeNum").and_then(|v| v.as_i64())
+                        .or_else(|| first.get("likeNum").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+                        .unwrap_or(0);
+                    comment_count = first.get("commentNum").and_then(|v| v.as_i64())
+                        .or_else(|| first.get("commentNum").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()))
+                        .unwrap_or(0);
                 }
-            } else if status == "done" {
-                let final_data = if let Ok(guard) = chunks_for_nav.lock() {
-                    let combined: Vec<serde_json::Value> = guard
-                        .iter()
-                        .flat_map(|c| {
-                            serde_json::from_str::<Vec<serde_json::Value>>(c)
-                                .unwrap_or_default()
-                        })
-                        .collect();
-                    serde_json::json!(combined).to_string()
-                } else {
-                    "[]".to_string()
-                };
-                let _ = tx.try_send(final_data);
-            } else if status == "warmup" {
-                let warmup_json = serde_json::json!({"error": format!("warmup:result={}", data)}).to_string();
-                let _ = tx.try_send(warmup_json);
-                let _ = app_for_progress.emit("ks-parse-progress", serde_json::json!({
-                    "total": 0, "warmup": true,
-                }));
-            } else if status == "error" {
-                let err_json = serde_json::json!({"error": data}).to_string();
-                let _ = tx.try_send(err_json);
             }
-            return false;
         }
-        true
-    })
-    .build()
-    .map_err(|e| ParseError::Internal(format!("无法创建快手解析WebView: {}", e)))?;
-
-    #[cfg(target_os = "windows")]
-    {
-        let cookies_owned = cookies.clone();
-        let window_for_signal = _window.clone();
-
-        let _ = _window.with_webview(move |webview| {
-            use webview2_com::Microsoft::Web::WebView2::Win32::*;
-            use windows::core::{Interface, PCWSTR};
-
-            unsafe {
-                let controller: ICoreWebView2Controller = webview.controller();
-                let core: ICoreWebView2 = controller.CoreWebView2().unwrap();
-                let core2: ICoreWebView2_2 = core.cast().unwrap();
-                let cookie_manager: ICoreWebView2CookieManager =
-                    core2.CookieManager().unwrap();
-
-                for part in cookies_owned.split("; ") {
-                    let mut kv = part.splitn(2, '=');
-                    let name = kv.next().unwrap_or("").trim();
-                    let value = kv.next().unwrap_or("").trim();
-                    if name.is_empty() {
-                        continue;
-                    }
-
-                    let name_w: Vec<u16> =
-                        name.encode_utf16().chain(std::iter::once(0)).collect();
-                    let value_w: Vec<u16> =
-                        value.encode_utf16().chain(std::iter::once(0)).collect();
-                    let domain_w: Vec<u16> = ".kuaishou.com"
-                        .encode_utf16()
-                        .chain(std::iter::once(0))
-                        .collect();
-                    let path_w: Vec<u16> =
-                        "/".encode_utf16().chain(std::iter::once(0)).collect();
-
-                    if let Ok(cookie) = cookie_manager.CreateCookie(
-                        PCWSTR(name_w.as_ptr()),
-                        PCWSTR(value_w.as_ptr()),
-                        PCWSTR(domain_w.as_ptr()),
-                        PCWSTR(path_w.as_ptr()),
-                    ) {
-                        let _ = cookie_manager.AddOrUpdateCookie(&cookie);
-                    }
-                }
-            }
-
-            let _ = window_for_signal.eval("window.__COOKIES_READY__ = true;");
-        });
     }
 
-    let data = loop {
-        let result = tokio::time::timeout(std::time::Duration::from_secs(660), rx.recv()).await;
-        match result {
-            Ok(Some(data)) => break data,
-            Ok(None) => break "[]".to_string(),
-            Err(_) => return Err(ParseError::Internal("快手主页解析超时(10min)".into())),
+    let _ = app.emit("cdp-parse-progress", serde_json::json!({
+        "message": "正在获取播放地址（需要几秒钟）...",
+    }));
+
+    // 2. CDP 获取 m3u8 播放地址
+    let state = app.state::<ChromeSessionState>();
+    let mut session = state.0.lock().await;
+
+    if !session.is_alive() || session.cdp.is_none() {
+        crate::cdp_parse::launch_and_connect(&app, &mut session, false).await?;
+    }
+
+    let cdp = session.cdp.as_ref().ok_or("Chrome 未启动")?.clone();
+    let event_rx = session.event_rx.as_ref().ok_or("事件通道未就绪")?.clone();
+    drop(session);
+
+    inject_cookies(&cdp, &cookies, ".miguvideo.com").await?;
+
+    let page_url = format!("https://www.miguvideo.com/p/vertical/{}", content_id);
+    let results = navigate_and_intercept(
+        &cdp, &event_rx, &page_url,
+        &[".m3u8"],
+        20,
+    ).await?;
+
+    // 找到含 #EXTINF 的实际 m3u8（不是 GSLB 跳转）
+    let mut m3u8_url = String::new();
+    for res in &results {
+        if res.body.contains("#EXTINF") {
+            m3u8_url = res.url.clone();
+            break;
         }
+        if res.body.starts_with("http") {
+            // GSLB 返回的是重定向 URL，也记录下来作为备选
+            let redirected = res.body.trim().to_string();
+            if m3u8_url.is_empty() {
+                m3u8_url = redirected;
+            }
+        }
+    }
+
+    if m3u8_url.is_empty() {
+        return Err("未能拦截到咪咕视频播放地址".into());
+    }
+
+    eprintln!("[咪咕单视频] m3u8_url={}", &m3u8_url[..m3u8_url.len().min(120)]);
+
+    // 3. 构造返回数据
+    let result = serde_json::json!({
+        "contentId": content_id,
+        "play": play,
+        "content": content,
+        "m3u8_url": m3u8_url,
+        "likeCount": like_count,
+        "commentCount": comment_count,
+    });
+
+    eprintln!("[咪咕单视频] 解析成功, contentId={}", content_id);
+
+    Ok(result.to_string())
+}
+
+// ── 央视CCTV单视频 (纯API) ────────────────────────────────────────
+
+#[tauri::command]
+pub async fn api_parse_cctv_video(
+    _app: tauri::AppHandle,
+    page_url: String,
+) -> Result<String, String> {
+    eprintln!("[央视] url={}", page_url);
+
+    let client = build_http_client().map_err(|e| e.to_string())?;
+
+    // 1. 请求页面 HTML，提取 guid
+    let resp = client.get(&page_url)
+        .header("User-Agent", UA)
+        .send().await
+        .map_err(|e| format!("请求央视页面失败: {}", e))?;
+    let html = resp.text().await
+        .map_err(|e| format!("读取央视页面失败: {}", e))?;
+
+    let guid = {
+        let re = regex::Regex::new(r#"guid\s*=\s*["']([a-f0-9]+)["']"#)
+            .map_err(|e| format!("正则编译失败: {}", e))?;
+        re.captures(&html)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().to_string())
+            .ok_or("页面中未找到视频ID (guid)")?
     };
 
-    if let Some(w) = _app_for_close.get_webview_window(&_label_for_close) {
-        let _ = w.close();
+    eprintln!("[央视] guid={}", guid);
+
+    // 2. 调用视频信息 API
+    let tsp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let api_url = format!(
+        "https://vdn.apps.cntv.cn/api/getHttpVideoInfo.do?pid={}&client=flash&im=0&tsp={}&vn=2049&vc=AF7FF58FF097A48CFF8495C5D6BCE1B1&uid=&wlan=",
+        guid, tsp
+    );
+    let info_resp = client.get(&api_url)
+        .header("User-Agent", UA)
+        .send().await
+        .map_err(|e| format!("获取视频信息失败: {}", e))?;
+    let info: serde_json::Value = info_resp.json().await
+        .map_err(|e| format!("解析视频信息失败: {}", e))?;
+
+    let title = info.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let hls_url = info.get("hls_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let image = info.get("image").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let duration_str = info.pointer("/video/totalLength").and_then(|v| v.as_str()).unwrap_or("0");
+    let duration_secs: f64 = duration_str.parse().unwrap_or(0.0);
+    let column = info.get("column").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let publish_time = info.get("f_pgmtime").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if hls_url.is_empty() {
+        return Err("未获取到视频播放地址".into());
     }
 
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
-        if let Some(err) = json.get("error").and_then(|e| e.as_str()) {
-            return Err(ParseError::Internal(err.to_string()));
+    // 3. 请求主 m3u8 获取最高画质
+    let main_m3u8 = client.get(&hls_url)
+        .header("User-Agent", UA)
+        .send().await
+        .map_err(|e| format!("请求m3u8失败: {}", e))?
+        .text().await
+        .map_err(|e| format!("读取m3u8失败: {}", e))?;
+
+    let base_url = hls_url.rsplitn(2, '/').nth(1).unwrap_or("");
+
+    let mut best_url = hls_url.clone();
+    let mut best_bw: u64 = 0;
+    let mut best_res = String::new();
+
+    for line in main_m3u8.lines() {
+        if line.starts_with("#EXT-X-STREAM-INF") {
+            let bw = line.split("BANDWIDTH=").nth(1)
+                .and_then(|s| s.split(',').next())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            let res = line.split("RESOLUTION=").nth(1)
+                .and_then(|s| s.split(',').next())
+                .unwrap_or("").trim().to_string();
+            if bw > best_bw {
+                best_bw = bw;
+                best_res = res;
+            }
+        } else if best_bw > 0 && !line.starts_with('#') && !line.trim().is_empty() {
+            let path = line.trim();
+            best_url = if path.starts_with("http") {
+                path.to_string()
+            } else if path.starts_with('/') {
+                if let Some(origin) = hls_url.find("://").and_then(|i| hls_url[i+3..].find('/').map(|j| &hls_url[..i+3+j])) {
+                    format!("{}{}", origin, path)
+                } else {
+                    format!("{}{}", base_url, path)
+                }
+            } else {
+                format!("{}/{}", base_url, path)
+            };
+            best_bw = 0;
         }
     }
 
-    Ok(data)
+    let (vw, vh) = if best_res.contains('x') {
+        let parts: Vec<&str> = best_res.split('x').collect();
+        (parts[0].parse::<u64>().unwrap_or(0), parts[1].parse::<u64>().unwrap_or(0))
+    } else { (0, 0) };
+
+    let result = serde_json::json!({
+        "title": title,
+        "guid": guid,
+        "m3u8_url": best_url,
+        "cover_url": image,
+        "duration": duration_secs,
+        "column": column,
+        "publish_time": publish_time,
+        "video_width": vw,
+        "video_height": vh,
+    });
+
+    eprintln!("[央视] 解析成功, title={}, 最高画质={}", title, best_res);
+
+    Ok(result.to_string())
+}
+
+// ── 央视CCTV栏目列表 (纯API) ──────────────────────────────────────
+
+#[tauri::command]
+pub async fn api_parse_cctv_column(
+    app: tauri::AppHandle,
+    page_url: String,
+) -> Result<String, String> {
+    eprintln!("[央视栏目] url={}", page_url);
+
+    let _ = app.emit("cdp-parse-progress", serde_json::json!({
+        "message": "正在加载央视栏目...",
+    }));
+
+    let client = build_http_client().map_err(|e| e.to_string())?;
+
+    // 1. 请求栏目页面 HTML，提取 columnId (TOPC...)
+    let resp = client.get(&page_url)
+        .header("User-Agent", UA)
+        .send().await
+        .map_err(|e| format!("请求栏目页面失败: {}", e))?;
+    let html = resp.text().await
+        .map_err(|e| format!("读取栏目页面失败: {}", e))?;
+
+    let column_id = {
+        let re = regex::Regex::new(r"TOPC\d+")
+            .map_err(|e| format!("正则编译失败: {}", e))?;
+        re.find(&html)
+            .map(|m| m.as_str().to_string())
+            .ok_or("页面中未找到栏目ID (TOPC...)")?
+    };
+
+    eprintln!("[央视栏目] columnId={}", column_id);
+
+    // 2. 获取栏目信息
+    let col_info_url = format!(
+        "https://api.cntv.cn/lanmu/columnInfoByColumnId?id={}&serviceId=tvcctv",
+        column_id
+    );
+    let col_resp = client.get(&col_info_url)
+        .header("User-Agent", UA)
+        .send().await.ok();
+    let mut column_name = String::new();
+    if let Some(resp) = col_resp {
+        if let Ok(text) = resp.text().await {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                column_name = json.pointer("/data/column_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("").to_string();
+            }
+        }
+    }
+
+    eprintln!("[央视栏目] 栏目名: {}", column_name);
+
+    // 3. 分页获取所有视频
+    let mut all_count: usize = 0;
+    let mut page: usize = 1;
+    let page_size = 20;
+
+    loop {
+        if page > 500 { break; }
+
+        let list_url = format!(
+            "https://api.cntv.cn/NewVideo/getVideoListByColumn?id={}&n={}&sort=desc&p={}&d=&mode=0&serviceId=tvcctv",
+            column_id, page_size, page
+        );
+
+        let resp = client.get(&list_url)
+            .header("User-Agent", UA)
+            .send().await
+            .map_err(|e| format!("获取视频列表失败: {}", e))?;
+        let text = resp.text().await
+            .map_err(|e| format!("读取视频列表失败: {}", e))?;
+
+        // JSONP 格式去包装
+        let json_str = if let Some(start) = text.find('{') {
+            let end = text.rfind('}').unwrap_or(text.len() - 1);
+            &text[start..=end]
+        } else {
+            &text
+        };
+
+        let data: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| format!("解析视频列表失败: {}", e))?;
+
+        let total = data.pointer("/data/total").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+        let list = data.pointer("/data/list").and_then(|v| v.as_array());
+
+        if let Some(items) = list {
+            if items.is_empty() { break; }
+
+            // 为每个视频获取 m3u8 地址
+            let mut enriched: Vec<serde_json::Value> = Vec::new();
+            for item in items {
+                let guid = item.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mut enriched_item = item.clone();
+
+                if !guid.is_empty() {
+                    let tsp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    let api_url = format!(
+                        "https://vdn.apps.cntv.cn/api/getHttpVideoInfo.do?pid={}&client=flash&im=0&tsp={}&vn=2049&vc=AF7FF58FF097A48CFF8495C5D6BCE1B1&uid=&wlan=",
+                        guid, tsp
+                    );
+                    if let Ok(info_resp) = client.get(&api_url).header("User-Agent", UA).send().await {
+                        if let Ok(info) = info_resp.json::<serde_json::Value>().await {
+                            let hls_url = info.get("hls_url").and_then(|v| v.as_str()).unwrap_or("");
+                            if !hls_url.is_empty() {
+                                // 获取最高画质 m3u8
+                                if let Ok(main_resp) = client.get(hls_url).header("User-Agent", UA).send().await {
+                                    if let Ok(main_text) = main_resp.text().await {
+                                        let base = hls_url.rsplitn(2, '/').nth(1).unwrap_or("");
+                                        let origin = hls_url.find("://")
+                                            .and_then(|i| hls_url[i+3..].find('/').map(|j| &hls_url[..i+3+j]))
+                                            .unwrap_or("");
+                                        let mut best_bw: u64 = 0;
+                                        let mut best_m3u8 = hls_url.to_string();
+                                        for line in main_text.lines() {
+                                            if line.starts_with("#EXT-X-STREAM-INF") {
+                                                let bw = line.split("BANDWIDTH=").nth(1)
+                                                    .and_then(|s| s.split(',').next())
+                                                    .and_then(|s| s.trim().parse::<u64>().ok())
+                                                    .unwrap_or(0);
+                                                if bw > best_bw { best_bw = bw; }
+                                            } else if best_bw > 0 && !line.starts_with('#') && !line.trim().is_empty() {
+                                                let path = line.trim();
+                                                best_m3u8 = if path.starts_with("http") { path.to_string() }
+                                                    else if path.starts_with('/') { format!("{}{}", origin, path) }
+                                                    else { format!("{}/{}", base, path) };
+                                                best_bw = 0;
+                                            }
+                                        }
+                                        if let Some(obj) = enriched_item.as_object_mut() {
+                                            obj.insert("m3u8_url".to_string(), serde_json::json!(best_m3u8));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(obj) = enriched_item.as_object_mut() {
+                    obj.insert("column_name".to_string(), serde_json::json!(column_name));
+                }
+                enriched.push(enriched_item);
+            }
+
+            all_count += enriched.len();
+
+            let _ = app.emit("cdp-parse-chunk", serde_json::json!({
+                "platform": "cctv",
+                "type": "homepage",
+                "items": &enriched,
+            }));
+            let _ = app.emit("cdp-parse-progress", serde_json::json!({
+                "message": format!("已加载 {}/{} 个节目（第{}页）", all_count, total, page),
+            }));
+        } else {
+            break;
+        }
+
+        if all_count >= total { break; }
+        page += 1;
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+
+    if all_count == 0 {
+        return Err("该栏目未找到视频数据".into());
+    }
+
+    let _ = app.emit("cdp-parse-done", serde_json::json!({
+        "platform": "cctv",
+        "type": "homepage",
+        "total": all_count,
+    }));
+
+    eprintln!("[央视栏目] 解析完成, 共{}个节目", all_count);
+
+    Ok(serde_json::json!({"total": all_count}).to_string())
+}
+
+// ── 央视频 yangshipin 单视频 (CDP获取mp4直链) ─────────────────────
+
+#[tauri::command]
+pub async fn api_parse_yangshipin_video(
+    app: tauri::AppHandle,
+    vid: String,
+) -> Result<String, String> {
+    use crate::cdp_parse::ChromeSessionState;
+
+    eprintln!("[央视频] vid={}", vid);
+
+    let _ = app.emit("cdp-parse-progress", serde_json::json!({
+        "message": "正在解析央视频视频...",
+    }));
+
+    // 1. CDP 打开页面获取 mp4 直链
+    let state = app.state::<ChromeSessionState>();
+    let mut session = state.0.lock().await;
+
+    if !session.is_alive() || session.cdp.is_none() {
+        crate::cdp_parse::launch_and_connect(&app, &mut session, false).await?;
+    }
+
+    let cdp = session.cdp.as_ref().ok_or("Chrome 未启动")?.clone();
+    drop(session);
+
+    let page_url = format!("https://yangshipin.cn/video/home?vid={}", vid);
+    cdp.navigate_and_wait(&page_url, 15).await?;
+
+    // 等待视频加载
+    tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+
+    // 从 <video> 标签获取 mp4 URL 和页面信息
+    let video_js = r#"(function(){
+        try {
+            var v = document.querySelector('video');
+            var mp4 = v ? (v.src || v.currentSrc || '') : '';
+            var title = document.title || '';
+            // 尝试获取更多信息
+            var duration = v ? v.duration : 0;
+            var poster = v ? v.poster : '';
+            return JSON.stringify({
+                mp4_url: mp4,
+                title: title,
+                duration: duration || 0,
+                poster: poster
+            });
+        } catch(e) {
+            return JSON.stringify({error: e.message});
+        }
+    })()"#;
+
+    let raw = cdp.eval(video_js).await?;
+    let info: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|_| "解析视频信息失败")?;
+
+    let mp4_url = info.get("mp4_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if mp4_url.is_empty() || !mp4_url.contains(".mp4") {
+        return Err("未能获取到央视频视频播放地址".into());
+    }
+
+    let title = info.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let title = title.replace(" - 央视频", "").replace(" - 有品质的视频社交媒体", "").trim().to_string();
+    let duration = info.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+    let result = serde_json::json!({
+        "vid": vid,
+        "title": title,
+        "mp4_url": mp4_url,
+        "duration": duration,
+    });
+
+    eprintln!("[央视频] 解析成功, title={}", title);
+
+    Ok(result.to_string())
+}
+
+// ── 咪咕主页 (纯API，不需要CDP) ───────────────────────────────────
+
+#[tauri::command]
+pub async fn api_parse_migu_homepage(
+    app: tauri::AppHandle,
+    author_id: String,
+    _cookies: String,
+) -> Result<String, String> {
+    eprintln!("[咪咕主页] authorId={}", author_id);
+
+    let _ = app.emit("cdp-parse-progress", serde_json::json!({
+        "message": "正在加载咪咕主页...",
+    }));
+
+    let client = build_http_client()
+        .map_err(|e| e.to_string())?;
+
+    // 1. 纯 API 获取用户信息
+    let user_resp = client.get(&format!(
+        "https://v4-sc.miguvideo.com/user/staticcache/queryUserInfo/{}", author_id
+    )).header("User-Agent", UA).send().await
+        .map_err(|e| format!("获取用户信息失败: {}", e))?;
+    let user_data: serde_json::Value = user_resp.json().await
+        .map_err(|e| format!("解析用户信息失败: {}", e))?;
+    let user_info = user_data.pointer("/body/data").cloned().unwrap_or(serde_json::json!({}));
+    let author_name = user_info.get("sname").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let author_avatar = user_info.get("picture").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    eprintln!("[咪咕主页] 作者: {}", author_name);
+
+    // 2. 纯 API 分页获取所有视频列表，逐页推送
+    let mut all_count: usize = 0;
+    let mut page: usize = 1;
+
+    loop {
+        if page > 500 { break; }
+        let list_url = format!(
+            "https://program-sc.miguvideo.com/private/social/staticcache/getVideoDynamicList/{}/{}/20",
+            author_id, page
+        );
+        let resp = client.get(&list_url)
+            .header("User-Agent", UA)
+            .send().await
+            .map_err(|e| format!("获取视频列表失败: {}", e))?;
+        let data: serde_json::Value = resp.json().await
+            .map_err(|e| format!("解析视频列表失败: {}", e))?;
+
+        let body = data.get("body").unwrap_or(&data);
+        let items = body.get("data").and_then(|v| v.as_array());
+
+        if let Some(list) = items {
+            if list.is_empty() { break; }
+
+            let enriched: Vec<serde_json::Value> = list.iter().map(|item| {
+                let mut v = item.clone();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("author_name".to_string(), serde_json::json!(author_name));
+                    obj.insert("author_avatar".to_string(), serde_json::json!(author_avatar));
+                    obj.insert("author_id".to_string(), serde_json::json!(author_id));
+                }
+                v
+            }).collect();
+
+            all_count += enriched.len();
+
+            let _ = app.emit("cdp-parse-chunk", serde_json::json!({
+                "platform": "migu",
+                "type": "homepage",
+                "items": &enriched,
+            }));
+            let _ = app.emit("cdp-parse-progress", serde_json::json!({
+                "message": format!("已加载 {} 个作品（第{}页）", all_count, page),
+            }));
+        } else {
+            break;
+        }
+
+        let has_more = body.get("hasMoreData").and_then(|v| v.as_bool()).unwrap_or(false);
+        if !has_more { break; }
+
+        let next_page = body.get("pageNum").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        page = if next_page > page { next_page } else { page + 1 };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    if all_count == 0 {
+        return Err("该用户主页未找到视频数据".into());
+    }
+
+    let _ = app.emit("cdp-parse-done", serde_json::json!({
+        "platform": "migu",
+        "type": "homepage",
+        "total": all_count,
+    }));
+
+    eprintln!("[咪咕主页] 解析完成, 共{}个作品", all_count);
+
+    Ok(serde_json::json!({"total": all_count}).to_string())
 }
 
 // ── 图片尺寸探测 ──────────────────────────────────────────────────
@@ -1709,114 +1627,6 @@ async fn fetch_jpeg_dimensions(client: &reqwest::Client, url: &str) -> Option<(u
 
     None
 }
-
-// ── 快手单视频 ────────────────────────────────────────────────────
-
-#[tauri::command]
-pub async fn fetch_kuaishou_video(
-    page_url: String,
-    cookies: String,
-) -> ParseResult<String> {
-    let ks_client = build_ks_client()
-        .map_err(|e| ParseError::Internal(e))?;
-
-    let resp = ks_client
-        .get(&page_url)
-        .header("User-Agent", UA)
-        .header("Referer", "https://www.kuaishou.com/")
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-        .header("Cookie", &cookies)
-        .header("sec-ch-ua", r#""Chromium";v="131", "Not_A Brand";v="24""#)
-        .header("sec-ch-ua-mobile", "?0")
-        .header("sec-ch-ua-platform", r#""Windows""#)
-        .header("sec-fetch-dest", "document")
-        .header("sec-fetch-mode", "navigate")
-        .header("sec-fetch-site", "none")
-        .header("sec-fetch-user", "?1")
-        .header("Upgrade-Insecure-Requests", "1")
-        .send()
-        .await
-        .map_err(|e| ParseError::Internal(format!("快手页面请求失败: {}", e)))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(ParseError::Internal(format!("快手页面返回HTTP {}", status)));
-    }
-
-    let html = resp.text().await
-        .map_err(|e| ParseError::Internal(format!("读取快手页面失败: {}", e)))?;
-
-    let marker = "window.__APOLLO_STATE__=";
-    let start = html.find(marker)
-        .ok_or_else(|| ParseError::Internal("页面中未找到视频数据，可能被风控拦截".into()))?;
-
-    let json_start = start + marker.len();
-    let rest = &html[json_start..];
-
-    let mut depth = 0i32;
-    let mut end = 0usize;
-    for (i, ch) in rest.char_indices() {
-        match ch {
-            '{' | '[' => depth += 1,
-            '}' | ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if end == 0 {
-        return Err(ParseError::Internal("解析快手视频数据失败: 未找到完整JSON".into()));
-    }
-
-    let json_str = &rest[..end];
-    let mut apollo: serde_json::Value = serde_json::from_str(json_str)
-        .map_err(|e| ParseError::Internal(format!("快手数据JSON解析失败: {}", e)))?;
-
-    if let Some(dc) = apollo.get("defaultClient").and_then(|c| c.as_object()) {
-        let author_id = dc.keys()
-            .find(|k| k.starts_with("VisionVideoDetailAuthor:"))
-            .and_then(|k| dc.get(k))
-            .and_then(|a| a.get("id"))
-            .and_then(|id| id.as_str())
-            .map(|s| s.to_string());
-
-        let cover_url = dc.keys()
-            .find(|k| k.starts_with("VisionVideoDetailPhoto:"))
-            .and_then(|k| dc.get(k))
-            .and_then(|p| p.get("coverUrl"))
-            .and_then(|u| u.as_str())
-            .map(|s| s.to_string());
-
-        if let Some(uid) = author_id {
-            if let Ok(ks_client_inner) = build_ks_client() {
-                if let Some(profile) = ks_fetch_profile(&ks_client_inner, &uid, &cookies).await {
-                    if let Some(dc_mut) = apollo.get_mut("defaultClient").and_then(|c| c.as_object_mut()) {
-                        dc_mut.insert("__kuaishou_profile__".to_string(), profile);
-                    }
-                }
-            }
-        }
-
-        if let Some(url) = cover_url {
-            let reqwest_client = build_http_client()?;
-            if let Some((w, h)) = fetch_jpeg_dimensions(&reqwest_client, &url).await {
-                if let Some(dc_mut) = apollo.get_mut("defaultClient").and_then(|c| c.as_object_mut()) {
-                    dc_mut.insert("__cover_width__".to_string(), serde_json::json!(w));
-                    dc_mut.insert("__cover_height__".to_string(), serde_json::json!(h));
-                }
-            }
-        }
-    }
-
-    Ok(apollo.to_string())
-}
-
 
 // ── B站 WBI 签名 ─────────────────────────────────────────────────
 
@@ -1919,7 +1729,7 @@ async fn bili_fetch_playurl(
     bvid: &str,
     cid: i64,
     cookies: &str,
-) -> (String, i64, String, i64) {
+) -> (String, Vec<String>, i64, String, i64) {
     let url = format!(
         "https://api.bilibili.com/x/player/playurl?bvid={}&cid={}&qn=116&fnval=0&fourk=1",
         urlencoding::encode(bvid), cid
@@ -1927,6 +1737,7 @@ async fn bili_fetch_playurl(
     let play = bili_api_get(client, &url, cookies).await.ok();
 
     let mut video_url = String::new();
+    let mut backup_urls: Vec<String> = Vec::new();
     let mut video_size: i64 = 0;
     let mut video_codec = String::new();
     let mut video_bitrate: i64 = 0;
@@ -1941,6 +1752,13 @@ async fn bili_fetch_playurl(
                 video_size = first.get("size")
                     .and_then(|s| s.as_i64())
                     .unwrap_or(0);
+                if let Some(bu) = first.get("backup_url").and_then(|b| b.as_array()) {
+                    for u in bu {
+                        if let Some(s) = u.as_str() {
+                            if !s.is_empty() { backup_urls.push(s.to_string()); }
+                        }
+                    }
+                }
             }
         }
         let quality = play_data.get("quality").and_then(|q| q.as_i64()).unwrap_or(0);
@@ -1961,7 +1779,7 @@ async fn bili_fetch_playurl(
         }
     }
 
-    (video_url, video_size, video_codec, video_bitrate)
+    (video_url, backup_urls, video_size, video_codec, video_bitrate)
 }
 
 // ── B站单视频 ─────────────────────────────────────────────────────
@@ -2001,7 +1819,7 @@ pub async fn fetch_bilibili_video(
         .and_then(|f| f.as_i64())
         .unwrap_or(0);
 
-    let (video_url, video_size, video_codec, video_bitrate) =
+    let (video_url, backup_urls, video_size, video_codec, video_bitrate) =
         bili_fetch_playurl(&client, &bvid, cid, &cookies).await;
 
     let result = serde_json::json!({
@@ -2031,6 +1849,7 @@ pub async fn fetch_bilibili_video(
             "like": stat.get("like").and_then(|l| l.as_i64()).unwrap_or(0),
         },
         "video_url": video_url,
+        "video_url_fallbacks": backup_urls,
         "video_size": video_size,
         "video_codec": video_codec,
         "video_bitrate": video_bitrate,
@@ -2094,6 +1913,7 @@ pub async fn fetch_bilibili_homepage(
             break;
         }
 
+        let vlist_len = vlist.len();
         for mut v in vlist {
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("__card__".into(), card_info.clone());
@@ -2122,9 +1942,10 @@ pub async fn fetch_bilibili_homepage(
                         }
 
                         if cid > 0 {
-                            let (url, size, codec, bitrate) =
+                            let (url, fallbacks, size, codec, bitrate) =
                                 bili_fetch_playurl(&client, &item_bvid, cid, &cookies).await;
                             obj.insert("__video_url__".into(), serde_json::json!(url));
+                            obj.insert("__video_url_fallbacks__".into(), serde_json::json!(fallbacks));
                             obj.insert("__video_size__".into(), serde_json::json!(size));
                             obj.insert("__video_codec__".into(), serde_json::json!(codec));
                             obj.insert("__video_bitrate__".into(), serde_json::json!(bitrate));
@@ -2134,12 +1955,19 @@ pub async fn fetch_bilibili_homepage(
                 }
             }
             all_videos.push(v);
+        }
 
-            if all_videos.len() % 10 == 0 {
-                let _ = app.emit("bili-parse-progress", serde_json::json!({
-                    "total": all_videos.len(),
-                }));
-            }
+        if !all_videos.is_empty() {
+            let page_start = all_videos.len() - vlist_len;
+            let page_items: Vec<_> = all_videos[page_start..].to_vec();
+            let _ = app.emit("cdp-parse-chunk", serde_json::json!({
+                "platform": "bilibili",
+                "type": "homepage",
+                "items": &page_items,
+            }));
+            let _ = app.emit("cdp-parse-progress", serde_json::json!({
+                "message": format!("已加载 {} 个作品（第{}页）", all_videos.len(), page),
+            }));
         }
 
         let total_count = data.get("page")
@@ -2154,11 +1982,13 @@ pub async fn fetch_bilibili_homepage(
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
 
-    let _ = app.emit("bili-parse-progress", serde_json::json!({
+    let _ = app.emit("cdp-parse-done", serde_json::json!({
+        "platform": "bilibili",
+        "type": "homepage",
         "total": all_videos.len(),
     }));
 
-    Ok(serde_json::json!(all_videos).to_string())
+    Ok(serde_json::json!({"total": all_videos.len()}).to_string())
 }
 
 // ── 批量下载 ──────────────────────────────────────────────────────
@@ -2187,22 +2017,260 @@ fn build_download_client() -> ParseResult<reqwest::Client> {
 }
 
 fn derive_referer(url: &str) -> &str {
-    if url.contains("bilivideo.com") || url.contains("bilibili.com") {
+    if url.contains("bilivideo.com") || url.contains("bilibili.com")
+        || url.contains("hdslb.com") || url.contains("akamaized.net")
+        || url.contains("upgcxcode") {
         "https://www.bilibili.com/"
     } else if url.contains("douyinvod.com") || url.contains("douyin.com") || url.contains("byteicdn.com") || url.contains("byteimg.com") {
         "https://www.douyin.com/"
-    } else if url.contains("kuaishou") || url.contains("ksnvse.com") || url.contains("ksyun.com") || url.contains("yximgs.com") {
+    } else if url.contains("kuaishou") || url.contains("ksnvse.com") || url.contains("ksyun.com") || url.contains("yximgs.com") || url.contains("ndcimgs.com") || url.contains("oskwai.com") {
         "https://www.kuaishou.com/"
+    } else if url.contains("miguvideo.com") || url.contains("cmvideo.cn") || url.contains("migu") {
+        "https://www.miguvideo.com/"
+    } else if url.contains("cntv.cn") || url.contains("cctv.com") || url.contains("lxdns.com") {
+        "https://tv.cctv.com/"
+    } else if url.contains("yangshipin.cn") || url.contains("ysp.cctv.cn") {
+        "https://yangshipin.cn/"
     } else {
         ""
     }
+}
+
+fn find_ffmpeg() -> Option<std::path::PathBuf> {
+    // 1. 检查系统 PATH
+    if let Ok(output) = std::process::Command::new("ffmpeg").arg("-version").output() {
+        if output.status.success() {
+            return Some(std::path::PathBuf::from("ffmpeg"));
+        }
+    }
+    // 2. 检查应用资源目录
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    for candidate in &[
+        exe_dir.join("resources").join("ffmpeg.exe"),
+        exe_dir.join("ffmpeg.exe"),
+        exe_dir.join("resources").join("ffmpeg"),
+        exe_dir.join("ffmpeg"),
+    ] {
+        if candidate.exists() { return Some(candidate.clone()); }
+    }
+    None
+}
+
+async fn download_m3u8_as_mp4(
+    client: &reqwest::Client,
+    m3u8_url: &str,
+    save_path: &std::path::Path,
+    app: Option<&tauri::AppHandle>,
+    task_id: Option<&str>,
+) -> Result<u64, (String, bool)> {
+    let ffmpeg = find_ffmpeg()
+        .ok_or_else(|| ("未找到 ffmpeg，请安装 ffmpeg 或将 ffmpeg.exe 放到应用目录".to_string(), false))?;
+
+    // 获取 m3u8 内容
+    let m3u8_text = client.get(m3u8_url)
+        .header("User-Agent", UA)
+        .send().await
+        .map_err(|e| (format!("请求m3u8失败: {}", e), true))?
+        .text().await
+        .map_err(|e| (format!("读取m3u8失败: {}", e), true))?;
+
+    // 如果 m3u8 内容是重定向 URL（GSLB），再请求一次
+    let (final_m3u8_text, base_url) = if m3u8_text.trim().starts_with("http") {
+        let real_url = m3u8_text.trim();
+        let real_text = client.get(real_url)
+            .header("User-Agent", UA)
+            .send().await
+            .map_err(|e| (format!("请求实际m3u8失败: {}", e), true))?
+            .text().await
+            .map_err(|e| (format!("读取实际m3u8失败: {}", e), true))?;
+        let base = real_url.rsplitn(2, '/').nth(1).unwrap_or("").to_string();
+        (real_text, base)
+    } else {
+        let base = m3u8_url.rsplitn(2, '/').nth(1).unwrap_or("").to_string();
+        (m3u8_text, base)
+    };
+
+    // 解析 TS 分片
+    let origin = {
+        let m3u8_for_origin = if base_url.starts_with("http") { base_url.as_str() } else { m3u8_url };
+        m3u8_for_origin.find("://")
+            .and_then(|i| m3u8_for_origin[i+3..].find('/').map(|j| m3u8_for_origin[..i+3+j].to_string()))
+            .unwrap_or_default()
+    };
+
+    let ts_urls: Vec<String> = final_m3u8_text
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|line| {
+            let l = line.trim();
+            if l.starts_with("http") { l.to_string() }
+            else if l.starts_with('/') { format!("{}{}", origin, l) }
+            else { format!("{}/{}", base_url, l) }
+        })
+        .collect();
+
+    if ts_urls.is_empty() {
+        return Err(("m3u8中未找到TS分片".to_string(), false));
+    }
+
+    eprintln!("[m3u8下载] 共{}个TS分片", ts_urls.len());
+
+    if let (Some(a), Some(tid)) = (app, task_id) {
+        let _ = a.emit("download-file-progress", serde_json::json!({
+            "task_id": tid, "downloaded": 0, "total": ts_urls.len() as u64,
+        }));
+    }
+
+    // 创建临时目录
+    let tmp_dir = save_path.parent().unwrap_or(std::path::Path::new("."))
+        .join(format!(".migu_tmp_{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()));
+    tokio::fs::create_dir_all(&tmp_dir).await
+        .map_err(|e| (format!("创建临时目录失败: {}", e), false))?;
+
+    // 下载所有 TS 分片
+    let mut ts_files: Vec<std::path::PathBuf> = Vec::new();
+    let mut total_size: u64 = 0;
+
+    for (i, ts_url) in ts_urls.iter().enumerate() {
+        let ts_path = tmp_dir.join(format!("seg_{:04}.ts", i));
+        let resp = client.get(ts_url)
+            .header("User-Agent", UA)
+            .send().await
+            .map_err(|e| (format!("下载TS分片{}失败: {}", i, e), true))?;
+
+        if !resp.status().is_success() {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            return Err((format!("TS分片{}返回HTTP {}", i, resp.status()), true));
+        }
+
+        let bytes = resp.bytes().await
+            .map_err(|e| (format!("读取TS分片{}失败: {}", i, e), true))?;
+        total_size += bytes.len() as u64;
+        tokio::fs::write(&ts_path, &bytes).await
+            .map_err(|e| (format!("写入TS分片{}失败: {}", i, e), false))?;
+        ts_files.push(ts_path);
+
+        if let (Some(a), Some(tid)) = (app, task_id) {
+            let _ = a.emit("download-file-progress", serde_json::json!({
+                "task_id": tid,
+                "downloaded": (i + 1) as u64,
+                "total": ts_urls.len() as u64,
+            }));
+        }
+    }
+
+    // 生成 ffmpeg concat 文件列表
+    let list_path = tmp_dir.join("filelist.txt");
+    let list_content: String = ts_files.iter()
+        .map(|p| format!("file '{}'", p.to_string_lossy().replace('\\', "/")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    tokio::fs::write(&list_path, &list_content).await
+        .map_err(|e| (format!("写入合并列表失败: {}", e), false))?;
+
+    // 用 ffmpeg 合并为 mp4
+    if let Some(parent) = save_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+
+    let ffmpeg_clone = ffmpeg.clone();
+    let list_str = list_path.to_string_lossy().to_string();
+    let save_str = save_path.to_string_lossy().to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&ffmpeg_clone)
+            .arg("-y")
+            .arg("-f").arg("concat")
+            .arg("-safe").arg("0")
+            .arg("-i").arg(&list_str)
+            .arg("-c").arg("copy")
+            .arg(&save_str)
+            .output()
+    })
+    .await
+    .map_err(|e| (format!("ffmpeg任务失败: {}", e), false))?
+    .map_err(|e| (format!("执行ffmpeg失败: {}", e), false))?;
+
+    // 清理临时目录
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err((format!("ffmpeg合并失败: {}", stderr.chars().take(200).collect::<String>()), false));
+    }
+
+    // 获取最终文件大小
+    let final_size = tokio::fs::metadata(save_path).await
+        .map(|m| m.len())
+        .unwrap_or(total_size);
+
+    eprintln!("[m3u8下载] 合并完成, 大小={}KB", final_size / 1024);
+
+    Ok(final_size)
+}
+
+async fn resolve_migu_m3u8(app: &tauri::AppHandle, content_id: &str) -> Result<String, String> {
+    use crate::cdp_parse::{ChromeSessionState, inject_cookies, navigate_and_intercept};
+
+    let state = app.state::<ChromeSessionState>();
+    let mut session = state.0.lock().await;
+
+    if !session.is_alive() || session.cdp.is_none() {
+        crate::cdp_parse::launch_and_connect(app, &mut session, false).await?;
+    }
+
+    let cdp = session.cdp.as_ref().ok_or("Chrome 未启动")?.clone();
+    let event_rx = session.event_rx.as_ref().ok_or("事件通道未就绪")?.clone();
+    drop(session);
+
+    // 注入 Cookie（从数据库获取）
+    let migu_cookies: Option<String> = app.try_state::<crate::database::DbState>().and_then(|db| {
+        let conn = db.0.lock().ok()?;
+        let result = conn.prepare("SELECT cookies FROM platform_accounts WHERE platform='migu' AND status='active' LIMIT 1")
+            .ok()?.query_row([], |row| row.get::<_, String>(0)).ok();
+        result
+    });
+    if let Some(cookies) = migu_cookies {
+        let _ = inject_cookies(&cdp, &cookies, ".miguvideo.com").await;
+    }
+
+    let page_url = format!("https://www.miguvideo.com/p/vertical/{}", content_id);
+    let results = navigate_and_intercept(
+        &cdp, &event_rx, &page_url, &[".m3u8"], 20,
+    ).await?;
+
+    for res in &results {
+        if res.body.contains("#EXTINF") { return Ok(res.url.clone()); }
+        if res.body.starts_with("http") { return Ok(res.body.trim().to_string()); }
+    }
+
+    Err("未能拦截到m3u8地址".into())
 }
 
 async fn download_single_file(
     client: &reqwest::Client,
     url: &str,
     save_path: &std::path::Path,
+    app: Option<&tauri::AppHandle>,
+    task_id: Option<&str>,
 ) -> Result<u64, (String, bool)> {
+    // 咪咕视频：按需通过 CDP 获取 m3u8 播放地址
+    if url.starts_with("migu://resolve/") {
+        let content_id = &url["migu://resolve/".len()..];
+        let a = app.ok_or_else(|| ("咪咕视频需要app句柄".to_string(), false))?;
+
+        let m3u8_url = resolve_migu_m3u8(a, content_id).await
+            .map_err(|e| (format!("获取咪咕播放地址失败: {}", e), true))?;
+
+        if m3u8_url.is_empty() {
+            return Err(("未能获取到咪咕视频播放地址".to_string(), false));
+        }
+        return download_m3u8_as_mp4(client, &m3u8_url, save_path, app, task_id).await;
+    }
+
+    if url.contains(".m3u8") {
+        return download_m3u8_as_mp4(client, url, save_path, app, task_id).await;
+    }
     let referer = derive_referer(url);
 
     let resp = client
@@ -2242,12 +2310,24 @@ async fn download_single_file(
 
     let mut stream = resp.bytes_stream();
     let mut written: u64 = 0;
+    let mut last_emit: u64 = 0;
+    const EMIT_INTERVAL: u64 = 256 * 1024;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| (format!("读取数据中断: {}", e), true))?;
         file.write_all(&chunk).await
             .map_err(|e| (format!("写入失败: {}", e), false))?;
         written += chunk.len() as u64;
+        if let (Some(a), Some(tid)) = (app, task_id) {
+            if written - last_emit >= EMIT_INTERVAL {
+                last_emit = written;
+                let _ = a.emit("download-file-progress", serde_json::json!({
+                    "task_id": tid,
+                    "downloaded": written,
+                    "total": content_len.unwrap_or(0),
+                }));
+            }
+        }
     }
 
     file.flush().await.map_err(|e| (format!("刷新失败: {}", e), false))?;
@@ -2285,7 +2365,6 @@ pub async fn batch_download_videos(
     use serde_json::json;
 
     let total = tasks.len();
-    let emit_step = (total / 50).max(1).min(50);
     let completed = Arc::new(AtomicUsize::new(0));
     let failed = Arc::new(AtomicUsize::new(0));
     let skipped = Arc::new(AtomicUsize::new(0));
@@ -2318,13 +2397,11 @@ pub async fn batch_download_videos(
                 if meta.len() > 0 {
                     let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                     skipped.fetch_add(1, Ordering::Relaxed);
-                    if done % emit_step == 0 || done == total {
-                        let _ = app.emit("batch-download-progress", json!({
-                            "task_id": task_id, "status": "skipped",
-                            "completed": done, "total": total,
-                            "bytes": total_bytes.load(Ordering::Relaxed)
-                        }));
-                    }
+                    let _ = app.emit("batch-download-progress", json!({
+                        "task_id": task_id, "status": "skipped",
+                        "completed": done, "total": total,
+                        "bytes": total_bytes.load(Ordering::Relaxed)
+                    }));
                     return;
                 }
             }
@@ -2345,16 +2422,14 @@ pub async fn batch_download_videos(
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
 
-                    match download_single_file(&client, dl_url, &save_path).await {
+                    match download_single_file(&client, dl_url, &save_path, Some(&app), Some(&task_id)).await {
                         Ok(size) => {
                             let bytes = total_bytes.fetch_add(size, Ordering::Relaxed) + size;
                             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                            if done % emit_step == 0 || done == total {
-                                let _ = app.emit("batch-download-progress", json!({
-                                    "task_id": task_id, "status": "done",
-                                    "completed": done, "total": total, "bytes": bytes
-                                }));
-                            }
+                            let _ = app.emit("batch-download-progress", json!({
+                                "task_id": task_id, "status": "done",
+                                "completed": done, "total": total, "bytes": bytes
+                            }));
                             return;
                         }
                         Err((msg, retryable)) => {
@@ -2372,13 +2447,11 @@ pub async fn batch_download_videos(
 
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
             failed.fetch_add(1, Ordering::Relaxed);
-            if done % emit_step == 0 || done == total {
-                let _ = app.emit("batch-download-progress", json!({
-                    "task_id": task_id, "status": "error",
-                    "completed": done, "total": total, "error": last_error,
-                    "bytes": total_bytes.load(Ordering::Relaxed)
-                }));
-            }
+            let _ = app.emit("batch-download-progress", json!({
+                "task_id": task_id, "status": "error",
+                "completed": done, "total": total, "error": last_error,
+                "bytes": total_bytes.load(Ordering::Relaxed)
+            }));
         });
         handles.push(handle);
     }
