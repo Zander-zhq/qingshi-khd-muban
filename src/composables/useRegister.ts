@@ -1,7 +1,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { userRegisterApi } from '../api/auth'
-import { getDeviceId } from '../utils/device'
+import { getDeviceId, getInstanceId } from '../utils/device'
 import { getAppCredentials } from '../utils/config'
 
 export function useRegister() {
@@ -45,6 +45,7 @@ export function useRegister() {
         phone: phoneVal,
         password: password.value,
         device_id: deviceId.value,
+        instance_id: getInstanceId(),
       }
       const trimmedInvite = inviteCode.value.trim()
       if (trimmedInvite) params.invite_code = trimmedInvite

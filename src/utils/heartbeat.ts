@@ -1,6 +1,7 @@
 import { userHeartbeatApi, userLogoutApi } from '../api/auth'
 import { getAppCredentials } from './config'
-import { getDeviceId } from './device'
+import { getDeviceId, getInstanceId } from './device'
+import { clearSessionFromRust } from './session'
 import { logger } from './logger'
 
 const HEARTBEAT_INTERVAL = 60_000
@@ -27,7 +28,7 @@ export function setHeartbeatCallbacks(cbs: HeartbeatCallbacks) {
 async function sendHeartbeat(token: string) {
   try {
     const [{ appId }, deviceId] = await Promise.all([getAppCredentials(), getDeviceId()])
-    await userHeartbeatApi({ app_id: appId, token, device_id: deviceId })
+    await userHeartbeatApi({ app_id: appId, token, device_id: deviceId, instance_id: getInstanceId() })
     consecutiveFailures = 0
     logger.log('heartbeat', '心跳发送成功')
   } catch (err) {
@@ -82,11 +83,12 @@ export function stopHeartbeat() {
 export async function callLogoutApi(token: string) {
   try {
     const [{ appId }, deviceId] = await Promise.all([getAppCredentials(), getDeviceId()])
-    await userLogoutApi({ app_id: appId, token, device_id: deviceId })
+    await userLogoutApi({ app_id: appId, token, device_id: deviceId, instance_id: getInstanceId() })
     logger.log('logout', '退出接口调用成功')
   } catch (err) {
     logger.warn('logout', '退出接口调用失败', {
       message: err instanceof Error ? err.message : String(err),
     })
   }
+  clearSessionFromRust()
 }

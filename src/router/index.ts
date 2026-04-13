@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useUserStore } from '../stores/user'
 import { logger } from '../utils/logger'
 import { getBrand } from '../brand'
@@ -81,7 +82,9 @@ router.beforeEach((to) => {
 })
 
 router.afterEach((to) => {
-  logger.log('router', '路由跳转完成', { to: to.fullPath, title: document.title })
+  const title = document.title
+  getCurrentWindow().setTitle(title).catch(() => {})
+  logger.log('router', '路由跳转完成', { to: to.fullPath, title })
 })
 
 export default router

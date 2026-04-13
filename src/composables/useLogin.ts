@@ -4,11 +4,12 @@ import { userLoginApi, userHeartbeatApi } from '../api/auth'
 import { useUserStore, toFullUrl } from '../stores/user'
 import { useCheckin } from './useCheckin'
 import { getBrand } from '../brand'
-import { getDeviceId } from '../utils/device'
+import { getDeviceId, getInstanceId } from '../utils/device'
 import { getAppCredentials } from '../utils/config'
 import { logger } from '../utils/logger'
 import { switchToMainLayout, showWindow, ensureLoginSize } from '../utils/window'
 import { startHeartbeat } from '../utils/heartbeat'
+import { registerSessionToRust } from '../utils/session'
 import { appStorage } from '../utils/storage'
 
 export interface SavedAccount {
@@ -301,6 +302,7 @@ export function useLogin() {
         acctno: acctno.value.trim(),
         password: password.value,
         device_id: deviceId.value,
+        instance_id: getInstanceId(),
         brand_id: getBrand().id,
       }, { signal: loginAbortController.signal })
       if (res.token) {
@@ -348,6 +350,7 @@ export function useLogin() {
 
       errMsg.value = ''
       startHeartbeat(userStore.token)
+      registerSessionToRust(userStore.token)
       await switchToMainLayout(router)
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === 'AbortError') return
@@ -423,14 +426,21 @@ export function useLogin() {
       logger.log('login', '检测到本地 token，向服务端验证有效性...')
       loading.value = true
       try {
-        await userHeartbeatApi({ app_id: appId.value, token: userStore.token, device_id: deviceId.value })
+        await userHeartbeatApi({ app_id: appId.value, token: userStore.token, device_id: deviceId.value, instance_id: getInstanceId() })
         logger.log('login', 'token 验证通过，进入主布局')
         startHeartbeat(userStore.token)
+        registerSessionToRust(userStore.token)
         await switchToMainLayout(router)
       } catch (e) {
-        logger.warn('login', 'token 验证失败，清除登录态', { message: (e as Error)?.message })
+        const code = (e as any)?.code as number | undefined
+        const msg = e instanceof Error ? e.message : String(e)
+        logger.warn('login', 'token 验证失败，清除登录态', { code, message: msg })
         userStore.logout()
-        errMsg.value = ''
+        if (code === -5 || (code === -1 && msg.includes('多开'))) {
+          errMsg.value = msg || '该设备已有客户端在运行，不允许多开'
+        } else {
+          errMsg.value = ''
+        }
       }
       loading.value = false
       if (!userStore.isLoggedIn) {

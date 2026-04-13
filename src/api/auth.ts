@@ -5,6 +5,7 @@ export interface UserLoginParams {
   acctno: string
   password: string
   device_id: string
+  instance_id: string
   brand_id?: string
 }
 
@@ -13,6 +14,7 @@ export interface UserRegisterParams {
   phone: string
   password: string
   device_id: string
+  instance_id?: string
   acctno?: string
   nickname?: string
   invite_code?: string
@@ -27,12 +29,14 @@ export interface HeartbeatParams {
   app_id: string
   token: string
   device_id: string
+  instance_id: string
 }
 
 export interface LogoutParams {
   app_id: string
   token: string
   device_id: string
+  instance_id: string
 }
 
 export function userLoginApi(data: UserLoginParams, config?: { signal?: AbortSignal }) {

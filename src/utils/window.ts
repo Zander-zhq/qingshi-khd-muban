@@ -90,5 +90,13 @@ export async function showWindow() {
 
 export async function exitApp() {
   logger.log('window', '退出应用')
+  try {
+    const { useUserStore } = await import('../stores/user')
+    const userStore = useUserStore()
+    if (userStore.token) {
+      const { callLogoutApi } = await import('./heartbeat')
+      await callLogoutApi(userStore.token)
+    }
+  } catch { /* 登出失败不阻塞退出 */ }
   await invoke('exit_app')
 }

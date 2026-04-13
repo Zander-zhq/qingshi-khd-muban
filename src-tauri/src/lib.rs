@@ -28,6 +28,90 @@ use app_config::{APP_ID, APP_KEY};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/* ─── 退出时登出会话 ─── */
+
+#[derive(Clone)]
+struct SessionInfo {
+    token: String,
+    device_id: String,
+    instance_id: String,
+    app_id: String,
+    api_base_url: String,
+}
+
+struct SessionState(std::sync::Mutex<Option<SessionInfo>>);
+
+#[tauri::command]
+fn register_session(app: AppHandle, token: String, device_id: String, instance_id: String, api_base_url: String) {
+    if let Some(state) = app.try_state::<SessionState>() {
+        if let Ok(mut session) = state.0.lock() {
+            *session = Some(SessionInfo {
+                token, device_id, instance_id,
+                app_id: APP_ID.to_string(),
+                api_base_url,
+            });
+        }
+    }
+}
+
+#[tauri::command]
+fn clear_session(app: AppHandle) {
+    if let Some(state) = app.try_state::<SessionState>() {
+        if let Ok(mut session) = state.0.lock() {
+            *session = None;
+        }
+    }
+}
+
+fn send_logout_on_exit(session: &SessionInfo) {
+    let body = serde_json::json!({
+        "app_id": &session.app_id,
+        "token": &session.token,
+        "device_id": &session.device_id,
+        "instance_id": &session.instance_id,
+    });
+
+    let obj = body.as_object().unwrap();
+    let mut sorted: BTreeMap<&str, String> = BTreeMap::new();
+    for (k, v) in obj {
+        if k == "sign" { continue; }
+        let val_str = match v {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => v.to_string(),
+        };
+        sorted.insert(k.as_str(), val_str);
+    }
+
+    let params: Vec<String> = sorted.iter().map(|(k, v)| format!("{}={}", k, v)).collect();
+    let param_str = params.join("&");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    let nonce = generate_nonce();
+    let sign_string = format!("{}&timestamp={}&nonce={}", param_str, timestamp, nonce);
+
+    let Ok(mut mac) = <HmacSha256 as Mac>::new_from_slice(APP_KEY.as_bytes()) else { return };
+    mac.update(sign_string.as_bytes());
+    let sign = hex::encode(mac.finalize().into_bytes());
+
+    let url = format!("{}/client/user/logout", session.api_base_url);
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build() else { return };
+
+    let _ = client.post(&url)
+        .header("Content-Type", "application/json")
+        .header("X-App-Id", &session.app_id)
+        .header("X-Timestamp", &timestamp)
+        .header("X-Nonce", &nonce)
+        .header("X-Sign", &sign)
+        .json(&body)
+        .send();
+}
+
 struct TrayChecks {
     autostart_on: CheckMenuItem<tauri::Wry>,
     autostart_off: CheckMenuItem<tauri::Wry>,
@@ -958,13 +1042,16 @@ pub fn run() {
             cdp_parse::cdp_close_login,
             get_setting,
             set_setting,
-            get_all_settings
+            get_all_settings,
+            register_session,
+            clear_session
         ])
         .setup(|app| {
             let db = database::init_database(&app.handle())
                 .expect("数据库初始化失败");
             app.manage(db);
 
+            app.manage(SessionState(std::sync::Mutex::new(None)));
             app.manage(chrome_app::ChromeProcess(std::sync::Mutex::new(None)));
             app.manage(chrome_app::LoginSessionManager(std::sync::Mutex::new(std::collections::HashMap::new())));
             app.manage(cdp_parse::ChromeSessionState(tokio::sync::Mutex::new(cdp_parse::ChromeSession::new())));
@@ -1083,6 +1170,17 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<SessionState>() {
+                    if let Ok(mut session) = state.0.lock() {
+                        if let Some(ref info) = session.take() {
+                            send_logout_on_exit(info);
+                        }
+                    }
+                }
+            }
+        });
 }

@@ -11,3 +11,9 @@ export async function getDeviceId(): Promise<string> {
   }
   return cachedDeviceId
 }
+
+const instanceId = crypto.randomUUID()
+
+export function getInstanceId(): string {
+  return instanceId
+}

@@ -381,7 +381,7 @@ export async function initBrand(): Promise<void> {
     /* 网络失败时静默降级，用本地缓存或默认值 */
   }
   await cacheBrandLogo().catch(() => {})
-  syncTrayIcon().catch(() => {})
+  await syncTrayIcon().catch(() => {})
 }
 
 /**
