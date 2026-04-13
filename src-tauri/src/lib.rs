@@ -41,15 +41,63 @@ struct SessionInfo {
 
 struct SessionState(std::sync::Mutex<Option<SessionInfo>>);
 
+fn session_file_path() -> PathBuf {
+    std::env::temp_dir().join("qingshi-khd-session.json")
+}
+
+fn persist_session(info: &SessionInfo) {
+    let path = session_file_path();
+    let json = serde_json::json!({
+        "token": &info.token,
+        "device_id": &info.device_id,
+        "instance_id": &info.instance_id,
+        "app_id": &info.app_id,
+        "api_base_url": &info.api_base_url,
+    });
+    let _ = fs::write(&path, json.to_string());
+}
+
+fn remove_session_file() {
+    let _ = fs::remove_file(session_file_path());
+}
+
+fn cleanup_stale_session() {
+    let path = session_file_path();
+    if !path.exists() { return; }
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => { let _ = fs::remove_file(&path); return; }
+    };
+    let _ = fs::remove_file(&path);
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    let info = SessionInfo {
+        token: json["token"].as_str().unwrap_or_default().to_string(),
+        device_id: json["device_id"].as_str().unwrap_or_default().to_string(),
+        instance_id: json["instance_id"].as_str().unwrap_or_default().to_string(),
+        app_id: json["app_id"].as_str().unwrap_or_default().to_string(),
+        api_base_url: json["api_base_url"].as_str().unwrap_or_default().to_string(),
+    };
+    if !info.token.is_empty() {
+        eprintln!("[会话清理] 检测到上次异常退出的残留会话，正在登出...");
+        send_logout_on_exit(&info);
+        eprintln!("[会话清理] 残留会话已清理");
+    }
+}
+
 #[tauri::command]
 fn register_session(app: AppHandle, token: String, device_id: String, instance_id: String, api_base_url: String) {
     if let Some(state) = app.try_state::<SessionState>() {
         if let Ok(mut session) = state.0.lock() {
-            *session = Some(SessionInfo {
+            let info = SessionInfo {
                 token, device_id, instance_id,
                 app_id: APP_ID.to_string(),
                 api_base_url,
-            });
+            };
+            persist_session(&info);
+            *session = Some(info);
         }
     }
 }
@@ -61,6 +109,7 @@ fn clear_session(app: AppHandle) {
             *session = None;
         }
     }
+    remove_session_file();
 }
 
 fn send_logout_on_exit(session: &SessionInfo) {
@@ -1047,6 +1096,8 @@ pub fn run() {
             clear_session
         ])
         .setup(|app| {
+            cleanup_stale_session();
+
             let db = database::init_database(&app.handle())
                 .expect("数据库初始化失败");
             app.manage(db);
@@ -1181,6 +1232,7 @@ pub fn run() {
                         }
                     }
                 }
+                remove_session_file();
             }
         });
 }
