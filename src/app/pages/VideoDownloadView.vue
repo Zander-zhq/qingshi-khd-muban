@@ -11,7 +11,7 @@ import TabView from 'primevue/tabview'
 import TabPanel from 'primevue/tabpanel'
 import Dialog from 'primevue/dialog'
 import InputText from 'primevue/inputtext'
-import Select from 'primevue/select'
+// import Select from 'primevue/select'
 import Tag from 'primevue/tag'
 
 // ── 数据模型 ──────────────────────────────────────────────────────
@@ -165,7 +165,6 @@ const dlOptions = reactive({
 })
 const dlProgress = reactive({ completed: 0, total: 0, bytes: 0 })
 const dlSpeed = ref('')
-const lastFailedTasks = ref<BatchDownloadTask[]>()
 let dlSpeedTimer: ReturnType<typeof setInterval> | null = null
 let dlLastBytes = 0
 let dlLastTime = Date.now()
@@ -555,8 +554,6 @@ function parseKuaishouFeedItem(item: Record<string, unknown>): ParsedVideoInfo {
   const avgBitrate = Number(rep?.avgBitrate || 0)
   const fileSize = Number(rep?.fileSize || 0)
   const qualityType = String(rep?.qualityType || '')
-  const frameRate = Number(rep?.frameRate || 0)
-
   return {
     platform: 'KS', avatar: String(author.headerUrl || ''),
     author_name: String(author.name || ''), author_id: authorId,
@@ -941,7 +938,7 @@ function parseXiaohongshuHomepageItem(item: Record<string, unknown>): ParsedVide
   const publishTime = timeTs > 0 ? new Date(timeTs).toLocaleString('zh-CN') : '无'
   const durationSec = durationMs > 1000 ? Math.round(durationMs / 1000) : durationMs
 
-  const result: ParsedVideoInfo & { xsec_token?: string } = {
+  const result: ParsedVideoInfo & Record<string, unknown> = {
     platform: '小红薯',
     avatar: String(item.__author_avatar__ || user.avatar || ''),
     author_name: String(item.__author_name__ || user.nickname || user.nick_name || ''),
@@ -975,7 +972,7 @@ function parseXiaohongshuHomepageItem(item: Record<string, unknown>): ParsedVide
     comments: parseCnNumber(commentCount),
     favorites: parseCnNumber(collected),
   }
-  if (xsecToken) (result as Record<string, unknown>).xsec_token = xsecToken
+  if (xsecToken) result.xsec_token = xsecToken
   return result as ParsedVideoInfo
 }
 
