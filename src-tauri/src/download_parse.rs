@@ -2607,22 +2607,49 @@ fn derive_referer(url: &str) -> &str {
     }
 }
 
-fn find_ffmpeg() -> Option<std::path::PathBuf> {
-    // 1. 检查系统 PATH
-    if let Ok(output) = std::process::Command::new("ffmpeg").arg("-version").output() {
-        if output.status.success() {
-            return Some(std::path::PathBuf::from("ffmpeg"));
+fn find_ffmpeg(app: Option<&tauri::AppHandle>) -> Option<std::path::PathBuf> {
+    // 1. Tauri resource_dir (打包后资源的正确路径)
+    if let Some(app) = app {
+        use tauri::Manager;
+        if let Ok(res_dir) = app.path().resource_dir() {
+            let p = res_dir.join("resources").join("ffmpeg.exe");
+            if p.exists() { return Some(p); }
+            let p = res_dir.join("resources").join("ffmpeg");
+            if p.exists() { return Some(p); }
         }
     }
-    // 2. 检查应用资源目录
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    for candidate in &[
-        exe_dir.join("resources").join("ffmpeg.exe"),
-        exe_dir.join("ffmpeg.exe"),
-        exe_dir.join("resources").join("ffmpeg"),
-        exe_dir.join("ffmpeg"),
-    ] {
-        if candidate.exists() { return Some(candidate.clone()); }
+    // 2. exe 同级目录
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        for candidate in &[
+            exe_dir.join("resources").join("ffmpeg.exe"),
+            exe_dir.join("ffmpeg.exe"),
+            exe_dir.join("resources").join("ffmpeg"),
+            exe_dir.join("ffmpeg"),
+        ] {
+            if candidate.exists() { return Some(candidate.clone()); }
+        }
+    }
+    // 3. 系统 PATH
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        if let Ok(output) = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .creation_flags(0x08000000)
+            .output()
+        {
+            if output.status.success() {
+                return Some(std::path::PathBuf::from("ffmpeg"));
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(output) = std::process::Command::new("ffmpeg").arg("-version").output() {
+            if output.status.success() {
+                return Some(std::path::PathBuf::from("ffmpeg"));
+            }
+        }
     }
     None
 }
@@ -2634,7 +2661,7 @@ async fn download_m3u8_as_mp4(
     app: Option<&tauri::AppHandle>,
     task_id: Option<&str>,
 ) -> Result<u64, (String, bool)> {
-    let ffmpeg = find_ffmpeg()
+    let ffmpeg = find_ffmpeg(app)
         .ok_or_else(|| ("未找到 ffmpeg，请安装 ffmpeg 或将 ffmpeg.exe 放到应用目录".to_string(), false))?;
 
     // 获取 m3u8 内容

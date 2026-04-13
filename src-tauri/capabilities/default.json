@@ -26,7 +26,8 @@
       "identifier": "http:default",
       "allow": [
         { "url": "https://km-dev.hygjx.com/**" },
-        { "url": "https://resource.huayunjingling.cn/**" }
+        { "url": "https://resource.huayunjingling.cn/**" },
+        { "url": "https://*.myqcloud.com/**" }
       ]
     },
     "dialog:default"

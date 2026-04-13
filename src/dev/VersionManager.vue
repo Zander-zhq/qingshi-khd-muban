@@ -7,7 +7,7 @@ import { VERSION, getBrand } from '../brand'
 import { useUserStore } from '../stores/user'
 import { getAppCredentials } from '../utils/config'
 import axios from 'axios'
-import { checkUpdate, fetchNextVersion, createVersion, uploadExe, updateVersion } from '../api/version'
+import { checkUpdate, fetchNextVersion, uploadExe, confirmExeUpload } from '../api/version'
 import type { UpdateVersion } from '../api/version'
 
 const userStore = useUserStore()
@@ -56,6 +56,13 @@ async function addVersion() {
   editForceUpdate.value = false
   showEditor.value = true
 }
+
+watch(showEditor, async (visible) => {
+  if (visible) {
+    await nextTick()
+    if (richRef.value) richRef.value.innerHTML = editDescription.value
+  }
+})
 
 function onRichInput() {
   if (richRef.value) editDescription.value = richRef.value.innerHTML
@@ -229,28 +236,22 @@ async function startUpload(outputPath: string) {
     for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i)
 
     const fileName = outputPath.split(/[\\/]/).pop() || 'setup.exe'
-    const file = new File([bytes], fileName, { type: 'application/octet-stream' })
-    buildLogs.value += `文件大小: ${(file.size / 1024 / 1024).toFixed(2)} MB\n`
+    buildLogs.value += `文件大小: ${(bytes.length / 1024 / 1024).toFixed(2)} MB\n`
 
     const res = await uploadExe(
-      userStore.token, appId, pendingVersion.value, file,
+      userStore.token, appId, pendingVersion.value, bytes, fileName,
       (p) => { uploadProgress.value = p },
+      (msg) => { buildLogs.value += msg + '\n' },
     )
-    buildLogs.value += `上传成功: ${res.url}\n`
 
-    buildLogs.value += `正在创建版本记录…\n`
-    const createRes = await createVersion(userStore.token, {
+    buildLogs.value += `正在确认版本并发布…\n`
+    await confirmExeUpload({
+      token: userStore.token,
       app_id: appId,
       version: pendingVersion.value,
+      download_url: res.download_url,
       description: editDescription.value,
       force_update: editForceUpdate.value,
-    })
-    pendingVersionId.value = createRes.id
-    buildLogs.value += `版本记录已创建 (ID: ${createRes.id})\n`
-
-    buildLogs.value += `正在更新版本下载地址…\n`
-    await updateVersion(userStore.token, pendingVersionId.value, {
-      download_url: res.url,
     })
 
     uploadStatus.value = 'done'
@@ -261,9 +262,19 @@ async function startUpload(outputPath: string) {
   } catch (err: unknown) {
     uploadStatus.value = 'error'
     let detail = ''
-    if (axios.isAxiosError(err) && err.response) {
-      const d = err.response.data
-      detail = `[${err.response.status}] ${d?.msg || d?.message || JSON.stringify(d)}`
+    if (axios.isAxiosError(err)) {
+      const parts = [
+        `message: ${err.message}`,
+        `code: ${err.code || 'N/A'}`,
+      ]
+      if (err.response) {
+        const d = err.response.data
+        parts.push(`status: ${err.response.status}`)
+        parts.push(`body: ${d?.msg || d?.message || JSON.stringify(d)?.slice(0, 500)}`)
+      } else {
+        parts.push('无响应(连接被拒绝/超时/CORS)')
+      }
+      detail = parts.join(' | ')
     } else {
       detail = err instanceof Error ? err.message : String(err)
     }
@@ -367,7 +378,7 @@ onUnmounted(cleanupBuildListeners)
                 <button @click="richExec('insertUnorderedList')" title="列表">• 列表</button>
                 <button @click="richExec('insertOrderedList')" title="有序列表">1. 列表</button>
               </div>
-              <div ref="richRef" class="vm-richtext" contenteditable="true" @input="onRichInput" v-html="editDescription"></div>
+              <div ref="richRef" class="vm-richtext" contenteditable="true" @input="onRichInput"></div>
             </div>
             <div class="vm-field">
               <label class="vm-check">
