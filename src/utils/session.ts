@@ -1,12 +1,11 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getDeviceId, getInstanceId } from './device'
-import { getAppCredentials } from './config'
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL as string
 
 export async function registerSessionToRust(token: string): Promise<void> {
   try {
-    const [deviceId, { appId }] = await Promise.all([getDeviceId(), getAppCredentials()])
+    const deviceId = await getDeviceId()
     await invoke('register_session', {
       token,
       deviceId,
