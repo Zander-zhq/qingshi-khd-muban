@@ -37,5 +37,27 @@ output/
 *.sln
 *.sw?
 
+# Test/debug data
+*_test.json
+*_api_*.json
+*_detail.json
+*_feed*.json
+*_response.json
+*_info.json
+video-count.json
+*.png
+!src/**/*.png
+!src-tauri/**/*.png
+
+# Scripts artifacts
+scripts/__pycache__/
+scripts/**/target/
+scripts/**/*.csv
+scripts/**/batch_results/
+scripts/**/*_captures/
+
+# Playwright MCP
+.playwright-mcp/
+
 # Cursor
 .cursor/

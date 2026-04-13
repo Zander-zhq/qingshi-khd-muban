@@ -1540,7 +1540,228 @@ pub async fn api_parse_xiaohongshu_video(
     Ok(result.to_string())
 }
 
-// ── 小红书主页 (CDP滚动+API拦截) ─────────────────────────────────
+// ── 小红书主页 (CDP滚动+API拦截+并行详情补全) ────────────────────
+
+async fn xhs_fetch_note_details(
+    client: &reqwest::Client,
+    note_items: &[(String, String)], // (noteId, xsec_token)
+    cookies: &str,
+    author_name: &str,
+    author_avatar: &str,
+    user_id: &str,
+) -> Vec<serde_json::Value> {
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
+    let client = std::sync::Arc::new(client.clone());
+    let cookies = cookies.to_string();
+
+    let mut handles = Vec::new();
+    for (_idx, (nid, token)) in note_items.iter().enumerate() {
+        let client = client.clone();
+        let cookies = cookies.clone();
+        let sem = sem.clone();
+        let nid = nid.clone();
+        let token = token.clone();
+        let a_name = author_name.to_string();
+        let a_avatar = author_avatar.to_string();
+        let uid = user_id.to_string();
+
+        let handle = tokio::spawn(async move {
+            let _permit = sem.acquire().await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            // 带 xsec_token 请求详情页
+            let note_url = if token.is_empty() {
+                format!("https://www.xiaohongshu.com/explore/{}", nid)
+            } else {
+                format!("https://www.xiaohongshu.com/explore/{}?xsec_token={}&xsec_source=pc_user", nid, urlencoding::encode(&token))
+            };
+            eprintln!("[小红书详情] 请求 nid={} hasToken={}", nid, !token.is_empty());
+
+            let mut title = String::new();
+            let mut desc = String::new();
+            let mut duration: i64 = 0;
+            let mut time: i64 = 0;
+            let mut video_url = String::new();
+            let mut cover = String::new();
+            let mut vw: i64 = 0;
+            let mut vh: i64 = 0;
+            let mut note_type = String::from("video");
+            let mut liked = String::new();
+            let mut collected = String::new();
+            let mut comment = String::new();
+            let mut shared = String::new();
+            let mut images: Vec<String> = Vec::new();
+
+            if let Ok(resp) = client.get(&note_url)
+                .header("User-Agent", UA)
+                .header("Cookie", &cookies)
+                .header("Referer", "https://www.xiaohongshu.com/")
+                .send().await
+            {
+                let status = resp.status();
+                if let Ok(html) = resp.text().await {
+                    let has_state = html.contains("__INITIAL_STATE__");
+                    let has_note_map = html.contains("noteDetailMap");
+                    eprintln!("[小红书详情] nid={} status={} len={} hasState={} hasNoteMap={} url前60={}", nid, status, html.len(), has_state, has_note_map, &note_url[..note_url.len().min(90)]);
+                    let marker = "__INITIAL_STATE__=";
+                    if let Some(start) = html.find(marker) {
+                        let rest = &html[start + marker.len()..];
+                        if let Some(end) = rest.find("</script>") {
+                            let json_str = rest[..end].trim().trim_end_matches(';').replace("undefined", "null");
+                            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                                Err(e) => eprintln!("[小红书详情] nid={} JSON解析失败: {}", nid, e),
+                                Ok(state) => {
+                                    let mut found_map = false;
+                                    if let Some(obj) = state.as_object() {
+                                        for (k, v) in obj {
+                                            if let Some(map) = v.get("noteDetailMap").and_then(|m| m.as_object()) {
+                                                found_map = true;
+                                                let map_keys: Vec<&String> = map.keys().collect();
+                                                let has_null_key = map.contains_key("null");
+                                                eprintln!("[小红书详情] nid={} noteDetailMap keys={:?} hasNullKey={} (在state.{}下)", nid, map_keys, has_null_key, k);
+                                                // 如果只有 "null" key，说明 xsec_token 缺失或无效
+                                                if has_null_key && map.len() == 1 {
+                                                    eprintln!("[小红书详情] ⚠️ nid={} noteDetailMap只有null键，xsec_token可能无效!", nid);
+                                                }
+                                                // 优先用 noteId 精确查找，否则取第一个非 null 的值
+                                                let detail_val = map.get(&nid)
+                                                    .or_else(|| map.values().find(|v| v.get("note").is_some()))
+                                                    .or_else(|| map.values().next());
+                                                if let Some(first) = detail_val {
+                                                    let note = first.get("note").unwrap_or(first);
+                                                    let note_keys: Vec<&String> = note.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                                                    title = note.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                                    desc = note.get("desc").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                                                    time = note.get("time").and_then(|t| t.as_i64()).unwrap_or(0);
+                                                    note_type = note.get("type").and_then(|t| t.as_str()).unwrap_or("video").to_string();
+                                                    let has_video = note.pointer("/video/media/stream/h264/0").is_some();
+                                                    eprintln!("[小红书详情] nid={} title={} time={} type={} hasVideo={} noteKeys={:?}", nid, &title[..title.len().min(30)], time, note_type, has_video, &note_keys[..note_keys.len().min(10)]);
+
+                                                    if let Some(interact) = note.get("interactInfo") {
+                                                        liked = interact.get("likedCount").and_then(|l| l.as_str()).unwrap_or("0").to_string();
+                                                        collected = interact.get("collectedCount").and_then(|c| c.as_str()).unwrap_or("0").to_string();
+                                                        comment = interact.get("commentCount").and_then(|c| c.as_str()).unwrap_or("0").to_string();
+                                                        shared = interact.get("shareCount").and_then(|s| s.as_str()).unwrap_or("0").to_string();
+                                                    }
+
+                                                    if let Some(h264) = note.pointer("/video/media/stream/h264/0") {
+                                                        duration = h264.get("duration").and_then(|d| d.as_i64()).unwrap_or(0);
+                                                        video_url = h264.get("masterUrl").and_then(|u| u.as_str()).unwrap_or("").to_string();
+                                                        vw = h264.get("width").and_then(|w| w.as_i64()).unwrap_or(0);
+                                                        vh = h264.get("height").and_then(|h| h.as_i64()).unwrap_or(0);
+                                                    }
+
+                                                    if let Some(img_list) = note.get("imageList").and_then(|i| i.as_array()) {
+                                                        for img in img_list {
+                                                            if let Some(url) = img.get("urlDefault").or_else(|| img.get("url")).and_then(|u| u.as_str()) {
+                                                                images.push(url.to_string());
+                                                                if cover.is_empty() { cover = url.to_string(); }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if !found_map {
+                                        let state_keys: Vec<&String> = state.as_object().map(|o| o.keys().collect()).unwrap_or_default();
+                                        eprintln!("[小红书详情] nid={} 未找到noteDetailMap! stateKeys={:?}", nid, state_keys);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                eprintln!("[小红书详情] nid={} HTTP请求失败!", nid);
+            }
+
+            serde_json::json!({
+                "noteId": nid,
+                "title": title,
+                "desc": desc,
+                "type": note_type,
+                "duration": duration,
+                "time": time,
+                "video_url": video_url,
+                "cover": cover,
+                "images": images,
+                "video_width": vw,
+                "video_height": vh,
+                "interactInfo": {
+                    "likedCount": liked,
+                    "collectedCount": collected,
+                    "commentCount": comment,
+                    "shareCount": shared,
+                },
+                "user": { "nickname": a_name, "avatar": a_avatar, "userId": uid },
+                "__author_name__": a_name,
+                "__author_avatar__": a_avatar,
+                "__user_id__": uid,
+            })
+        });
+        handles.push(handle);
+    }
+
+    let mut results = Vec::new();
+    for h in handles {
+        if let Ok(v) = h.await { results.push(v); }
+    }
+    results
+}
+
+/// 从列表数据（DOM提取或API user_posted响应）构建标准化的笔记对象
+/// 不再逐条HTTP请求详情页（会被限流），视频URL在下载时通过CDP解析
+fn build_xhs_list_item(
+    note: &serde_json::Value,
+    author_name: &str,
+    author_avatar: &str,
+    user_id: &str,
+) -> serde_json::Value {
+    let note_id = note.get("note_id").or(note.get("noteId"))
+        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let title = note.get("display_title").or(note.get("title"))
+        .and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // 判断是否视频
+    let is_video = note.get("is_video").and_then(|v| v.as_bool()).unwrap_or(false)
+        || note.get("type").and_then(|v| v.as_str()).unwrap_or("") == "video";
+    let note_type = if is_video { "video" } else { "normal" };
+
+    // 封面：DOM格式为 cover_url 字符串，API格式为 cover 对象
+    let cover = note.get("cover_url").and_then(|v| v.as_str())
+        .or_else(|| note.get("cover").and_then(|v| v.as_str()))
+        .or_else(|| note.pointer("/cover/url_default").and_then(|v| v.as_str()))
+        .or_else(|| note.pointer("/cover/url").and_then(|v| v.as_str()))
+        .unwrap_or("").to_string();
+
+    // 点赞数：DOM格式为 liked_count，API格式为 interact_info.liked_count
+    let liked = note.get("liked_count").and_then(|v| v.as_str())
+        .or_else(|| note.pointer("/interact_info/liked_count").and_then(|v| v.as_str()))
+        .unwrap_or("0").to_string();
+
+    let token = note.get("xsec_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let cover_w = note.pointer("/cover/width").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cover_h = note.pointer("/cover/height").and_then(|v| v.as_i64()).unwrap_or(0);
+
+    serde_json::json!({
+        "noteId": note_id,
+        "title": title,
+        "type": note_type,
+        "cover": cover,
+        "video_url": "",
+        "duration": 0,
+        "time": 0,
+        "video_width": cover_w,
+        "video_height": cover_h,
+        "xsec_token": token,
+        "interactInfo": { "likedCount": liked },
+        "__author_name__": author_name,
+        "__author_avatar__": author_avatar,
+        "__user_id__": user_id,
+    })
+}
 
 #[tauri::command]
 pub async fn api_parse_xiaohongshu_homepage(
@@ -1558,11 +1779,9 @@ pub async fn api_parse_xiaohongshu_homepage(
 
     let state = app.state::<ChromeSessionState>();
     let mut session = state.0.lock().await;
-
     if !session.is_alive() || session.cdp.is_none() {
         crate::cdp_parse::launch_and_connect(&app, &mut session, false).await?;
     }
-
     let cdp = session.cdp.as_ref().ok_or("Chrome 未启动")?.clone();
     let event_rx = session.event_rx.as_ref().ok_or("事件通道未就绪")?.clone();
     drop(session);
@@ -1573,90 +1792,124 @@ pub async fn api_parse_xiaohongshu_homepage(
     cdp.navigate_and_wait(&page_url, 15).await?;
     tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
-    // 从 DOM 提取用户信息 + 首屏笔记（SSR 数据）
-    let init_js = r#"(function(){
-        var name = document.querySelector('.user-name') ? document.querySelector('.user-name').textContent.trim() : '';
-        var avatar = document.querySelector('.avatar-wrapper img') ? document.querySelector('.avatar-wrapper img').src : '';
+    // 提取用户信息
+    let user_js = r#"(function(){
+        var n = document.querySelector('.user-name'); var a = document.querySelector('.avatar-wrapper img');
+        return JSON.stringify({name: n ? n.textContent.trim() : '', avatar: a ? a.src : ''});
+    })()"#;
+    let user_raw = cdp.eval(user_js).await.unwrap_or_default();
+    let user_info: serde_json::Value = serde_json::from_str(&user_raw).unwrap_or(serde_json::json!({}));
+    let author_name = user_info.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let author_avatar = user_info.get("avatar").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // ── Phase 1: 滚动虚拟列表收集全部初始笔记 ────────────
+    // 小红书用了虚拟滚动，DOM只渲染视口内约12条，但SSR实际加载了约30条
+    // 通过小幅滚动让虚拟列表把所有初始item渲染一遍，逐批收集
+    let dom_js = r#"(function(){
+        var items = [];
         var sections = document.querySelectorAll('section.note-item');
-        var notes = [];
-        var seen = {};
         for (var i = 0; i < sections.length; i++) {
             var s = sections[i];
             var links = s.querySelectorAll('a');
-            var noteId = '';
+            var noteId = '', token = '';
             for (var j = 0; j < links.length; j++) {
-                var href = links[j].href || links[j].getAttribute('href') || '';
+                var href = links[j].href || '';
                 var m = href.match(/\/([a-f0-9]{24})/);
-                if (m) { noteId = m[1]; break; }
+                if (m && !noteId) noteId = m[1];
+                var t = href.match(/xsec_token=([^&]+)/);
+                if (t && !token) token = decodeURIComponent(t[1]);
             }
-            if (!noteId || seen[noteId]) continue;
-            seen[noteId] = true;
-            var titleEl = s.querySelector('.footer .title span') || s.querySelector('.footer .title');
-            var title = titleEl ? titleEl.textContent.trim() : '';
-            var img = s.querySelector('img');
-            var cover = img ? img.src : '';
-            var likesEl = s.querySelector('.like-wrapper .count');
-            var likes = likesEl ? likesEl.textContent.trim() : '0';
-            var playIcon = s.querySelector('.play-icon');
-            notes.push({ noteId: noteId, title: title, cover: cover, likes: likes, isVideo: !!playIcon,
-                width: parseInt(s.getAttribute('data-width') || '0'), height: parseInt(s.getAttribute('data-height') || '0') });
+            if (!noteId) continue;
+            var title = '';
+            var titleEl = s.querySelector('.title span, .footer .title');
+            if (titleEl) title = titleEl.textContent.trim();
+            var cover = '';
+            var coverEl = s.querySelector('a.cover img, img');
+            if (coverEl) cover = coverEl.src || '';
+            var likes = '0';
+            var likesEl = s.querySelector('.like-wrapper .count, .count');
+            if (likesEl) likes = likesEl.textContent.trim();
+            var isVideo = !!s.querySelector('.play-icon, svg.play-icon, .video-icon, [class*="play"]');
+            items.push({note_id: noteId, xsec_token: token, display_title: title, cover_url: cover, liked_count: likes, is_video: isVideo});
         }
-        return JSON.stringify({name: name, avatar: avatar, notes: notes});
+        return JSON.stringify(items);
     })()"#;
 
-    let mut all_count: usize = 0;
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut author_name = String::new();
-    let mut author_avatar = String::new();
+    let mut initial_items: Vec<serde_json::Value> = Vec::new();
+    let mut all_count: usize = 0;
 
-    let raw = cdp.eval(init_js).await.unwrap_or_default();
-    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) {
-        author_name = data.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        author_avatar = data.get("avatar").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        if let Some(notes) = data.get("notes").and_then(|v| v.as_array()) {
-            let mut batch: Vec<serde_json::Value> = Vec::new();
-            for note in notes {
-                let nid = note.get("noteId").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                if !nid.is_empty() && seen_ids.insert(nid) {
-                    let mut item = note.clone();
-                    if let Some(obj) = item.as_object_mut() {
-                        obj.insert("__author_name__".to_string(), serde_json::json!(author_name));
-                        obj.insert("__author_avatar__".to_string(), serde_json::json!(author_avatar));
-                        obj.insert("__user_id__".to_string(), serde_json::json!(user_id));
-                    }
-                    batch.push(item);
-                }
-            }
-            if !batch.is_empty() {
-                all_count += batch.len();
-                let _ = app.emit("cdp-parse-chunk", serde_json::json!({
-                    "platform": "xiaohongshu", "type": "homepage", "items": &batch,
-                }));
-            }
+    // 首次提取
+    let raw = cdp.eval(dom_js).await.unwrap_or_default();
+    let batch: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    for item in &batch {
+        let nid = item.get("note_id").and_then(|v| v.as_str()).unwrap_or("");
+        if !nid.is_empty() && seen_ids.insert(nid.to_string()) {
+            initial_items.push(item.clone());
         }
     }
+    eprintln!("[小红书主页] DOM首次提取: {}条", initial_items.len());
 
-    eprintln!("[小红书主页] 作者: {}, 首批(DOM): {}个", author_name, all_count);
+    // 小幅滚动收集更多初始item（虚拟滚动会渲染不同批次）
+    let mut no_new_scroll = 0;
+    for scroll_round in 0..20 {
+        let _ = cdp.send("Input.dispatchMouseEvent", serde_json::json!({
+            "type": "mouseWheel", "x": 400, "y": 400, "deltaX": 0, "deltaY": 500
+        })).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    // 滚动加载更多 — 拦截 user_posted API 响应
+        let raw = cdp.eval(dom_js).await.unwrap_or_default();
+        let batch: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+        let prev = seen_ids.len();
+        for item in &batch {
+            let nid = item.get("note_id").and_then(|v| v.as_str()).unwrap_or("");
+            if !nid.is_empty() && seen_ids.insert(nid.to_string()) {
+                initial_items.push(item.clone());
+            }
+        }
+        if seen_ids.len() == prev {
+            no_new_scroll += 1;
+            if no_new_scroll >= 3 { break; }
+        } else {
+            no_new_scroll = 0;
+            eprintln!("[小红书主页] 滚动第{}次: 累计{}条", scroll_round + 1, seen_ids.len());
+        }
+    }
+    eprintln!("[小红书主页] 初始收集完成: {}条 (作者: {})", initial_items.len(), author_name);
+
+    // 将初始item构建为标准格式并推送
+    if !initial_items.is_empty() {
+        let items_json: Vec<serde_json::Value> = initial_items.iter().map(|item| {
+            build_xhs_list_item(item, &author_name, &author_avatar, &user_id)
+        }).collect();
+        all_count += items_json.len();
+
+        let _ = app.emit("cdp-parse-chunk", serde_json::json!({
+            "platform": "xiaohongshu", "type": "homepage", "items": &items_json,
+        }));
+        let _ = app.emit("cdp-parse-progress", serde_json::json!({
+            "message": format!("已加载 {} 个作品（首屏）", all_count),
+        }));
+    }
+
+    // ── Phase 2: 滚动触发 user_posted API，直接从API响应提取完整笔记 ────
     let mut no_new_rounds = 0;
     let mut api_page = 0;
+
     for _round in 0..200 {
-        // 快速滚轮
         for _ in 0..5 {
             let _ = cdp.send("Input.dispatchMouseEvent", serde_json::json!({
                 "type": "mouseWheel", "x": 400, "y": 400, "deltaX": 0, "deltaY": 800
             })).await;
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-
-        // 等待 API 响应 + 收集
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
+        // 从 user_posted API 响应中提取完整笔记对象
         let mut new_notes: Vec<serde_json::Value> = Vec::new();
         {
             let mut rx = event_rx.lock().await;
-            let mut pending_ids: Vec<String> = Vec::new();
+            let mut pending: Vec<String> = Vec::new();
             loop {
                 match tokio::time::timeout(std::time::Duration::from_millis(300), rx.recv()).await {
                     Ok(Some(ev)) => {
@@ -1665,27 +1918,19 @@ pub async fn api_parse_xiaohongshu_homepage(
                         if method == "Network.responseReceived" {
                             let url = params.pointer("/response/url").and_then(|u| u.as_str()).unwrap_or("");
                             let req_id = params.get("requestId").and_then(|r| r.as_str()).unwrap_or("").to_string();
-                            if url.contains("user_posted") {
-                                pending_ids.push(req_id);
-                            }
+                            if url.contains("user_posted") { pending.push(req_id); }
                         } else if method == "Network.loadingFinished" {
                             let req_id = params.get("requestId").and_then(|r| r.as_str()).unwrap_or("").to_string();
-                            if pending_ids.contains(&req_id) {
+                            if pending.contains(&req_id) {
                                 if let Ok(resp) = cdp.send("Network.getResponseBody", serde_json::json!({"requestId": req_id})).await {
                                     let body = resp.pointer("/result/body").and_then(|b| b.as_str()).unwrap_or("");
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
                                         if let Some(notes) = json.pointer("/data/notes").and_then(|v| v.as_array()) {
+                                            eprintln!("[小红书主页] API user_posted 返回 {} 条笔记", notes.len());
                                             for note in notes {
                                                 let nid = note.get("note_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                                if !nid.is_empty() && seen_ids.insert(nid.clone()) {
-                                                    let mut item = note.clone();
-                                                    if let Some(obj) = item.as_object_mut() {
-                                                        obj.insert("noteId".to_string(), serde_json::json!(nid));
-                                                        obj.insert("__author_name__".to_string(), serde_json::json!(author_name));
-                                                        obj.insert("__author_avatar__".to_string(), serde_json::json!(author_avatar));
-                                                        obj.insert("__user_id__".to_string(), serde_json::json!(user_id));
-                                                    }
-                                                    new_notes.push(item);
+                                                if !nid.is_empty() && seen_ids.insert(nid) {
+                                                    new_notes.push(note.clone());
                                                 }
                                             }
                                         }
@@ -1702,9 +1947,15 @@ pub async fn api_parse_xiaohongshu_homepage(
         if !new_notes.is_empty() {
             no_new_rounds = 0;
             api_page += 1;
-            all_count += new_notes.len();
+
+            let items_json: Vec<serde_json::Value> = new_notes.iter().map(|note| {
+                build_xhs_list_item(note, &author_name, &author_avatar, &user_id)
+            }).collect();
+            eprintln!("[小红书主页] 第{}页API: 新增{}条", api_page, items_json.len());
+            all_count += items_json.len();
+
             let _ = app.emit("cdp-parse-chunk", serde_json::json!({
-                "platform": "xiaohongshu", "type": "homepage", "items": &new_notes,
+                "platform": "xiaohongshu", "type": "homepage", "items": &items_json,
             }));
             let _ = app.emit("cdp-parse-progress", serde_json::json!({
                 "message": format!("已加载 {} 个作品（第{}页）", all_count, api_page),
@@ -2588,92 +2839,110 @@ async fn download_single_file(
         return download_m3u8_as_mp4(client, &m3u8_url, save_path, app, task_id).await;
     }
 
-    // 小红书：按需通过纯 API 获取 mp4 地址
+    // 小红书：按需通过 CDP 获取 mp4 地址（HTTP方式会被限流）
     if url.starts_with("xhs://resolve/") {
-        let note_id = &url["xhs://resolve/".len()..];
+        let rest = &url["xhs://resolve/".len()..];
+        let (note_id, xsec_token) = if let Some(q) = rest.find('?') {
+            let nid = &rest[..q];
+            let params = &rest[q + 1..];
+            let token = params.split('&')
+                .find(|p| p.starts_with("xsec_token="))
+                .map(|p| urlencoding::decode(&p["xsec_token=".len()..]).unwrap_or_default().to_string())
+                .unwrap_or_default();
+            (nid.to_string(), token)
+        } else {
+            (rest.to_string(), String::new())
+        };
         let a = app.ok_or_else(|| ("小红书需要app句柄".to_string(), false))?;
 
-        let note_url = format!("https://www.xiaohongshu.com/explore/{}", note_id);
+        // 用 CDP 导航到笔记页面提取视频URL（比HTTP更可靠，不会被限流）
+        let state = a.state::<crate::cdp_parse::ChromeSessionState>();
+        let mut session = state.0.lock().await;
+        if !session.is_alive() || session.cdp.is_none() {
+            crate::cdp_parse::launch_and_connect(&a, &mut session, false).await
+                .map_err(|e| (format!("启动Chrome失败: {}", e), true))?;
+        }
+        let cdp = session.cdp.as_ref().ok_or_else(|| ("Chrome未连接".to_string(), true))?.clone();
+        drop(session);
+
         let xhs_cookies: Option<String> = a.try_state::<crate::database::DbState>().and_then(|db| {
             let conn = db.0.lock().ok()?;
             let result = conn.prepare("SELECT cookies FROM platform_accounts WHERE platform='xiaohongshu' AND status='active' LIMIT 1")
                 .ok()?.query_row([], |row| row.get::<_, String>(0)).ok();
             result
         });
+        if let Some(ck) = &xhs_cookies {
+            let _ = crate::cdp_parse::inject_cookies(&cdp, ck, ".xiaohongshu.com").await;
+        }
 
-        let cookies = xhs_cookies.unwrap_or_default();
-        let xhs_client = build_http_client().map_err(|e| (e.to_string(), false))?;
+        let note_url = if xsec_token.is_empty() {
+            format!("https://www.xiaohongshu.com/explore/{}", note_id)
+        } else {
+            format!("https://www.xiaohongshu.com/explore/{}?xsec_token={}&xsec_source=pc_user", note_id, urlencoding::encode(&xsec_token))
+        };
+        eprintln!("[小红书下载] CDP导航解析 nid={}", note_id);
+        cdp.navigate_and_wait(&note_url, 10).await
+            .map_err(|e| (format!("导航失败: {}", e), true))?;
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
 
-        let resp = xhs_client.get(&note_url)
-            .header("User-Agent", UA)
-            .header("Cookie", &cookies)
-            .header("Referer", "https://www.xiaohongshu.com/")
-            .send().await
-            .map_err(|e| (format!("请求小红书页面失败: {}", e), true))?;
-        let html = resp.text().await
-            .map_err(|e| (format!("读取小红书页面失败: {}", e), true))?;
-
-        let marker = "__INITIAL_STATE__=";
-        if let Some(start) = html.find(marker) {
-            let json_start = start + marker.len();
-            let rest = &html[json_start..];
-            if let Some(end) = rest.find("</script>") {
-                let json_str = rest[..end].trim().trim_end_matches(';').replace("undefined", "null");
-                if let Ok(state) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                    if let Some(obj) = state.as_object() {
-                        for (_k, v) in obj {
-                            if let Some(map) = v.get("noteDetailMap").and_then(|m| m.as_object()) {
-                                if let Some(first) = map.values().next() {
-                                    let note = first.get("note").unwrap_or(first);
-                                    if let Some(mp4) = note.pointer("/video/media/stream/h264/0/masterUrl").and_then(|u| u.as_str()) {
-                                        if !mp4.is_empty() {
-                                            let real_url = if mp4.starts_with("http://") { mp4.replacen("http://", "https://", 1) } else { mp4.to_string() };
-                                            // 直接下载 mp4（不递归调用 download_single_file）
-                                            let referer = "https://www.xiaohongshu.com/";
-                                            let resp = client.get(&real_url)
-                                                .header("User-Agent", UA)
-                                                .header("Referer", referer)
-                                                .header("Accept", "*/*")
-                                                .send().await
-                                                .map_err(|e| (format!("请求失败: {}", e), true))?;
-                                            if !resp.status().is_success() {
-                                                return Err((format!("HTTP {}", resp.status()), true));
-                                            }
-                                            let content_len = resp.content_length();
-                                            let tmp_path = { let mut p = save_path.as_os_str().to_owned(); p.push(".downloading"); std::path::PathBuf::from(p) };
-                                            if let Some(parent) = save_path.parent() { let _ = tokio::fs::create_dir_all(parent).await; }
-                                            let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| (format!("创建文件失败: {}", e), false))?;
-                                            use futures_util::StreamExt;
-                                            use tokio::io::AsyncWriteExt;
-                                            let mut stream = resp.bytes_stream();
-                                            let mut written: u64 = 0;
-                                            let mut last_emit: u64 = 0;
-                                            while let Some(chunk) = stream.next().await {
-                                                let chunk = chunk.map_err(|e| (format!("读取数据中断: {}", e), true))?;
-                                                file.write_all(&chunk).await.map_err(|e| (format!("写入失败: {}", e), false))?;
-                                                written += chunk.len() as u64;
-                                                if let (Some(a), Some(tid)) = (app, task_id) {
-                                                    if written - last_emit >= 256 * 1024 {
-                                                        last_emit = written;
-                                                        let _ = a.emit("download-file-progress", serde_json::json!({"task_id": tid, "downloaded": written, "total": content_len.unwrap_or(0)}));
-                                                    }
-                                                }
-                                            }
-                                            file.flush().await.map_err(|e| (format!("刷新失败: {}", e), false))?;
-                                            drop(file);
-                                            if written == 0 { let _ = tokio::fs::remove_file(&tmp_path).await; return Err(("下载内容为空".into(), true)); }
-                                            tokio::fs::rename(&tmp_path, save_path).await.map_err(|e| (format!("保存失败: {}", e), false))?;
-                                            return Ok(written);
-                                        }
-                                    }
-                                }
-                            }
-                        }
+        // 从页面 __INITIAL_STATE__ 提取视频URL
+        let extract_js = r#"(function(){
+            try {
+                var state = JSON.parse(JSON.stringify(window.__INITIAL_STATE__));
+                for (var k in state) {
+                    var map = state[k] && state[k].noteDetailMap;
+                    if (!map) continue;
+                    for (var nk in map) {
+                        var note = map[nk].note || map[nk];
+                        var h264 = note && note.video && note.video.media && note.video.media.stream && note.video.media.stream.h264;
+                        if (h264 && h264[0] && h264[0].masterUrl) return h264[0].masterUrl;
+                    }
+                }
+            } catch(e){}
+            return '';
+        })()"#;
+        let mp4_url = cdp.eval(extract_js).await.unwrap_or_default();
+        if !mp4_url.is_empty() {
+            let real_url = if mp4_url.starts_with("http://") { mp4_url.replacen("http://", "https://", 1) } else { mp4_url };
+            eprintln!("[小红书下载] CDP解析成功 nid={} url前60={}", note_id, &real_url[..real_url.len().min(60)]);
+            // 直接下载（不递归调用download_single_file，避免async递归问题）
+            let referer = "https://www.xiaohongshu.com/";
+            let resp = client.get(&real_url)
+                .header("User-Agent", UA)
+                .header("Referer", referer)
+                .header("Accept", "*/*")
+                .send().await
+                .map_err(|e| (format!("请求失败: {}", e), true))?;
+            if !resp.status().is_success() {
+                return Err((format!("HTTP {}", resp.status()), true));
+            }
+            let content_len = resp.content_length();
+            let tmp_path = { let mut p = save_path.as_os_str().to_owned(); p.push(".downloading"); std::path::PathBuf::from(p) };
+            if let Some(parent) = save_path.parent() { let _ = tokio::fs::create_dir_all(parent).await; }
+            let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| (format!("创建文件失败: {}", e), false))?;
+            use futures_util::StreamExt;
+            use tokio::io::AsyncWriteExt;
+            let mut stream = resp.bytes_stream();
+            let mut written: u64 = 0;
+            let mut last_emit: u64 = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| (format!("读取中断: {}", e), true))?;
+                file.write_all(&chunk).await.map_err(|e| (format!("写入失败: {}", e), false))?;
+                written += chunk.len() as u64;
+                if let (Some(a), Some(tid)) = (app, task_id) {
+                    if written - last_emit >= 256 * 1024 {
+                        last_emit = written;
+                        let _ = a.emit("download-file-progress", serde_json::json!({"task_id": tid, "downloaded": written, "total": content_len.unwrap_or(0)}));
                     }
                 }
             }
+            file.flush().await.map_err(|e| (format!("刷新失败: {}", e), false))?;
+            drop(file);
+            if written == 0 { let _ = tokio::fs::remove_file(&tmp_path).await; return Err(("下载内容为空".into(), true)); }
+            tokio::fs::rename(&tmp_path, save_path).await.map_err(|e| (format!("保存失败: {}", e), false))?;
+            return Ok(written);
         }
-        return Err(("未能获取到小红书视频地址".to_string(), true));
+        return Err(("小红书视频URL解析失败".to_string(), true));
     }
 
     if url.contains(".m3u8") {

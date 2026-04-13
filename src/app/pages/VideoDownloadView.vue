@@ -925,13 +925,23 @@ function parseXiaohongshuHomepageItem(item: Record<string, unknown>): ParsedVide
   const title = String(item.title || item.display_title || '')
   const isVideo = item.isVideo === true || String(item.type || '') === 'video'
   const cover = typeof item.cover === 'string' ? item.cover : String((item.cover as Record<string, unknown>)?.url_default || (item.cover as Record<string, unknown>)?.url || '')
-  const interactInfo = (item.interact_info || {}) as Record<string, unknown>
-  const likes = String(item.likes || interactInfo.liked_count || '0')
+  const interactInfo = (item.interactInfo || item.interact_info || {}) as Record<string, unknown>
+  const likes = String(interactInfo.likedCount || interactInfo.liked_count || item.likes || '0')
+  const collected = String(interactInfo.collectedCount || '0')
+  const commentCount = String(interactInfo.commentCount || '0')
+  const shared = String(interactInfo.shareCount || '0')
   const user = (item.user || {}) as Record<string, unknown>
-  const vw = Number(item.width || (item.cover as Record<string, unknown>)?.width || 0)
-  const vh = Number(item.height || (item.cover as Record<string, unknown>)?.height || 0)
+  const vw = Number(item.video_width || item.width || (item.cover as Record<string, unknown>)?.width || 0)
+  const vh = Number(item.video_height || item.height || (item.cover as Record<string, unknown>)?.height || 0)
+  const xsecToken = String(item.xsec_token || '')
 
-  return {
+  const videoUrl = String(item.video_url || '')
+  const durationMs = Number(item.duration || 0)
+  const timeTs = Number(item.time || 0)
+  const publishTime = timeTs > 0 ? new Date(timeTs).toLocaleString('zh-CN') : '无'
+  const durationSec = durationMs > 1000 ? Math.round(durationMs / 1000) : durationMs
+
+  const result: ParsedVideoInfo & { xsec_token?: string } = {
     platform: '小红薯',
     avatar: String(item.__author_avatar__ || user.avatar || ''),
     author_name: String(item.__author_name__ || user.nickname || user.nick_name || ''),
@@ -942,17 +952,17 @@ function parseXiaohongshuHomepageItem(item: Record<string, unknown>): ParsedVide
     video_id: noteId,
     video_name: title || '无',
     hash: '',
-    video_url: '',
+    video_url: videoUrl,
     video_url_fallbacks: [],
     cover_url: cover,
     cover_url_fallbacks: [],
     collection_name: '',
-    topics: '无',
-    publish_time: '无',
-    publish_timestamp: 0,
-    video_width: 0,
-    video_height: 0,
-    duration: 0,
+    topics: String(item.desc || '无'),
+    publish_time: publishTime,
+    publish_timestamp: timeTs > 0 ? Math.floor(timeTs / 1000) : 0,
+    video_width: vw,
+    video_height: vh,
+    duration: durationSec,
     video_ext: isVideo ? 'mp4' : '图片',
     video_resolution: vw && vh ? `${Math.min(vw, vh)}p` : '无',
     video_bitrate: '无',
@@ -960,8 +970,13 @@ function parseXiaohongshuHomepageItem(item: Record<string, unknown>): ParsedVide
     video_codec: isVideo ? 'H264' : '图片',
     cover_width: 0, cover_height: 0, cover_resolution: '无',
     likes: parseCnNumber(likes),
-    plays: 0, shares: 0, comments: 0, favorites: 0,
+    plays: 0,
+    shares: parseCnNumber(shared),
+    comments: parseCnNumber(commentCount),
+    favorites: parseCnNumber(collected),
   }
+  if (xsecToken) (result as Record<string, unknown>).xsec_token = xsecToken
+  return result as ParsedVideoInfo
 }
 
 function upsertItem(info: ParsedVideoInfo, tab: string): boolean {
@@ -1058,6 +1073,21 @@ async function startParse() {
         info = parseCctvColumnItem(item)
       } else if (p === 'xiaohongshu' && t === 'homepage') {
         info = parseXiaohongshuHomepageItem(item)
+      } else if (p === 'xiaohongshu' && t === 'detail_update') {
+        const noteId = String(item.noteId || item.note_id || '')
+        const existing = allVideos.value.find(v => v.video_id === noteId)
+        if (existing) {
+          const dur = Number(item.duration || 0)
+          const ts = Number(item.time || 0)
+          const videoUrl = String(item.video_url || '')
+          if (dur > 0) existing.duration = dur / 1000
+          if (ts > 0) {
+            existing.publish_timestamp = ts
+            existing.publish_time = new Date(ts).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-')
+          }
+          if (videoUrl) existing.video_url = videoUrl
+        }
+        continue
       }
       if (info) {
         if (currentCollectionName) info.collection_name = currentCollectionName
@@ -1393,7 +1423,8 @@ async function startBatchDownload() {
             videoUrl = `migu://resolve/${item.video_id}`
           }
           if (!videoUrl && item.platform === '小红薯' && item.video_id && item.video_codec !== '图片') {
-            videoUrl = `xhs://resolve/${item.video_id}`
+            const xsecTk = (item as Record<string, unknown>).xsec_token || ''
+            videoUrl = xsecTk ? `xhs://resolve/${item.video_id}?xsec_token=${encodeURIComponent(String(xsecTk))}` : `xhs://resolve/${item.video_id}`
           }
           if (videoUrl) {
             const ext = item.video_ext && item.video_ext !== '无' ? item.video_ext : 'mp4'
