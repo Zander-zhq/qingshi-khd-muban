@@ -7,6 +7,7 @@ import type { CheckUpdateResult } from '../api/version'
 import { VERSION } from '../brand'
 import { logger } from '../utils/logger'
 import { appStorage } from '../utils/storage'
+import { stopHeartbeat, callLogoutApi } from '../utils/heartbeat'
 
 
 const SKIP_KEY = 'skip_version'
@@ -76,6 +77,19 @@ export function useVersionUpdate() {
       }
 
       downloadStatus.value = 'installing'
+
+      try {
+        stopHeartbeat()
+        const { useUserStore } = await import('../stores/user')
+        const userStore = useUserStore()
+        if (userStore.token) {
+          await callLogoutApi(userStore.token)
+          logger.log('version', '更新前退出登录成功')
+        }
+      } catch (e) {
+        logger.warn('version', '更新前退出登录失败，继续安装', e)
+      }
+
       await invoke('run_installer_and_exit', { installerPath })
     } catch (err) {
       downloadStatus.value = 'error'
