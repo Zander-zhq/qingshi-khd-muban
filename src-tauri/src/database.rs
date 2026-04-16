@@ -25,18 +25,7 @@ pub fn init_database(app: &AppHandle) -> Result<DbState, String> {
     let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {}", e))?;
 
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS platform_accounts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            platform TEXT NOT NULL,
-            name TEXT NOT NULL DEFAULT '',
-            avatar TEXT NOT NULL DEFAULT '',
-            cookies TEXT,
-            status TEXT NOT NULL DEFAULT 'not_logged',
-            remark TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-            updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
-        );
-        CREATE TABLE IF NOT EXISTS app_settings (
+        "CREATE TABLE IF NOT EXISTS app_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );",

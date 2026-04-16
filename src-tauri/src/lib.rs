@@ -19,11 +19,7 @@ use std::io::{BufRead, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod app_config;
-mod cdp_parse;
-mod chrome_app;
 mod database;
-mod download_accounts;
-mod download_parse;
 use app_config::{APP_ID, APP_KEY};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -219,24 +215,6 @@ fn reveal_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn exit_app(app: AppHandle) {
-    if let Some(state) = app.try_state::<chrome_app::ChromeProcess>() {
-        if let Ok(mut guard) = state.0.lock() {
-            if let Some(ref mut child) = *guard {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            *guard = None;
-        }
-    }
-    if let Some(state) = app.try_state::<chrome_app::LoginSessionManager>() {
-        if let Ok(mut sessions) = state.0.lock() {
-            for (_, session) in sessions.iter_mut() {
-                let _ = session.child.kill();
-                let _ = session.child.wait();
-            }
-            sessions.clear();
-        }
-    }
     app.exit(0);
 }
 
@@ -1053,42 +1031,6 @@ pub fn run() {
             download_file_to_dir,
             get_download_dir,
             run_installer_and_exit,
-            download_accounts::list_download_accounts,
-            download_accounts::upsert_download_account,
-            download_accounts::update_platform_account,
-            download_accounts::delete_platform_account,
-            download_accounts::check_download_cookie_status,
-            download_accounts::open_download_login,
-            download_accounts::capture_download_cookies,
-            download_accounts::close_download_webview,
-            download_parse::resolve_video_url,
-            download_parse::batch_download_videos,
-            chrome_app::launch_chrome_app,
-            chrome_app::kill_chrome_app,
-            chrome_app::is_chrome_running,
-            chrome_app::check_chrome_installed,
-            cdp_parse::cdp_ensure_chrome,
-            cdp_parse::cdp_check_login,
-            cdp_parse::cdp_show_chrome,
-            cdp_parse::cdp_hide_chrome,
-            cdp_parse::cdp_kill_chrome,
-            download_parse::api_parse_douyin_video,
-            download_parse::api_parse_douyin_homepage,
-            download_parse::api_parse_douyin_collection,
-            download_parse::api_find_douyin_mix_id,
-            download_parse::api_parse_kuaishou_video,
-            download_parse::api_parse_kuaishou_homepage,
-            download_parse::fetch_bilibili_video,
-            download_parse::fetch_bilibili_homepage,
-            download_parse::api_parse_migu_video,
-            download_parse::api_parse_migu_homepage,
-            download_parse::api_parse_cctv_video,
-            download_parse::api_parse_cctv_column,
-            download_parse::api_parse_yangshipin_video,
-            download_parse::api_parse_xiaohongshu_video,
-            download_parse::api_parse_xiaohongshu_homepage,
-            cdp_parse::cdp_open_login,
-            cdp_parse::cdp_close_login,
             get_setting,
             set_setting,
             get_all_settings,
@@ -1103,9 +1045,6 @@ pub fn run() {
             app.manage(db);
 
             app.manage(SessionState(std::sync::Mutex::new(None)));
-            app.manage(chrome_app::ChromeProcess(std::sync::Mutex::new(None)));
-            app.manage(chrome_app::LoginSessionManager(std::sync::Mutex::new(std::collections::HashMap::new())));
-            app.manage(cdp_parse::ChromeSessionState(tokio::sync::Mutex::new(cdp_parse::ChromeSession::new())));
 
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(target_os = "windows")]
