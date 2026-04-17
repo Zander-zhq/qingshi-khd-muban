@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 mod app_config;
 mod database;
+pub mod resource_loader;
 use app_config::{APP_ID, APP_KEY};
 
 type HmacSha256 = Hmac<Sha256>;
