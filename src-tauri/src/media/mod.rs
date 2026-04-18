@@ -24,7 +24,8 @@
 //! H.264 编码以后要用时走 OpenH264（Cisco 代付专利费）或 GPU 硬编（NVENC/QSV/AMF）。
 //!
 //! ## 模块组织
-//!  - [`concat`] 视频拼接（remux 复用封装，不重编码）
+//!  - [`concat`] 视频拼接（多文件 remux，不重编码）
+//!  - [`remux`]   容器转封装（TS→MP4 等，不重编码）
 //!  - [`trim`]    时间裁剪（TODO）
 //!  - [`filter`]  滤镜（TODO）
 //!  - [`merge`]   多流合并（TODO）
@@ -33,6 +34,7 @@
 
 mod error;
 pub mod concat;
+pub mod remux;
 pub mod trim;
 pub mod filter;
 pub mod merge;
@@ -41,6 +43,7 @@ pub mod encoder;
 
 pub use error::MediaError;
 pub use concat::concat_remux;
+pub use remux::remux;
 
 /// 延迟初始化 libav 网络和日志。多次调用幂等。
 ///
