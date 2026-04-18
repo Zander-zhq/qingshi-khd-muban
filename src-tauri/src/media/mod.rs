@@ -26,7 +26,8 @@
 //! ## 模块组织
 //!  - [`concat`] 视频拼接（多文件 remux，不重编码）
 //!  - [`remux`]   容器转封装（TS→MP4 等，不重编码）
-//!  - [`trim`]    时间裁剪（TODO）
+//!  - [`trim`]    时间裁剪（keyframe-based，不重编码）
+//!  - [`silence`] 音频静音检测
 //!  - [`filter`]  滤镜（TODO）
 //!  - [`merge`]   多流合并（TODO）
 //!  - [`extract`] 抽音轨/视频轨（TODO）
@@ -36,6 +37,7 @@ mod error;
 pub mod concat;
 pub mod remux;
 pub mod trim;
+pub mod silence;
 pub mod filter;
 pub mod merge;
 pub mod extract;
@@ -45,6 +47,8 @@ pub use error::MediaError;
 pub use concat::concat_remux;
 pub use remux::remux;
 pub use remux::remux_url;
+pub use trim::trim;
+pub use silence::{detect_silence, SilenceRange};
 
 /// 延迟初始化 libav 网络和日志。多次调用幂等。
 ///
