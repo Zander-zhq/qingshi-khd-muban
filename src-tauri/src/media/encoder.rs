@@ -104,8 +104,8 @@ fn test_encoder(name: &str) -> bool {
             Err(_) => return false,
         };
 
-        enc.set_width(64);
-        enc.set_height(64);
+        enc.set_width(256);
+        enc.set_height(256);
         enc.set_time_base(ffmpeg::Rational::new(1, 30));
         enc.set_format(ffmpeg::format::Pixel::YUV420P);
 
