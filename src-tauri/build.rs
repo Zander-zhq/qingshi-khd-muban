@@ -16,5 +16,11 @@ fn main() {
         println!("cargo:rustc-link-lib=bcrypt");
         println!("cargo:rustc-link-lib=secur32");
         println!("cargo:rustc-link-lib=ws2_32");
+        // openh264 + libmfx(QSV) 静态库需要显式链接
+        println!("cargo:rustc-link-lib=static=openh264");
+        println!("cargo:rustc-link-lib=static=libmfx");
+        if let Ok(dir) = std::env::var("FFMPEG_DIR") {
+            println!("cargo:rustc-link-search=native={}/lib", dir);
+        }
     }
 }
