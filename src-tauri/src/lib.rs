@@ -21,6 +21,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod app_config;
 mod database;
 pub mod resource_loader;
+
+// 视频处理模块：仅在启用 `media` feature 时编译，其他产品（不需要 ffmpeg）编译零开销
+#[cfg(feature = "media")]
+pub mod media;
 use app_config::{APP_ID, APP_KEY};
 
 type HmacSha256 = Hmac<Sha256>;

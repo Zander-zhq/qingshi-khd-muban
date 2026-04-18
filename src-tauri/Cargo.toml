@@ -33,6 +33,27 @@ regex = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tauri-plugin-dialog = "2.7.0"
 tauri-plugin-single-instance = "2"
+thiserror = "2"
+
+# ── 视频处理（libav 静态链接，feature-gated）──
+# ffmpeg-next 8.1 匹配 vcpkg 装的 FFmpeg 8.1。不启用 `build` feature，
+# 避免 ffmpeg-next 自己 clone ffmpeg 源码编译，而是用 vcpkg 预装的静态库。
+#
+# 构建前置要求（详见 docs/libav-integration.md）：
+# 1. vcpkg install ffmpeg:x64-windows-static-release
+# 2. 环境变量 FFMPEG_DIR=E:\vcpkg\installed\x64-windows-static-release
+# 3. 环境变量 VCPKG_ROOT=E:\vcpkg
+[dependencies.ffmpeg-next]
+version = "8.1"
+optional = true
+default-features = false
+features = ["codec", "format", "software-resampling", "software-scaling"]
+
+[features]
+default = []
+# 启用视频处理（libav 静态链接）。产品要用 media 模块时在自己 Cargo.toml 里开启。
+# 不启用时相关代码被 #[cfg] 跳过，编译零开销，不依赖 vcpkg。
+media = ["dep:ffmpeg-next"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
