@@ -38,6 +38,7 @@ pub mod concat;
 pub mod remux;
 pub mod trim;
 pub mod silence;
+pub mod smart_cut;
 pub mod filter;
 pub mod merge;
 pub mod extract;
@@ -49,6 +50,8 @@ pub use remux::remux;
 pub use remux::remux_url;
 pub use trim::trim;
 pub use silence::{detect_silence, SilenceRange};
+pub use smart_cut::smart_cut;
+pub use encoder::{pick_encoder, get_encoder_info, VideoCodec, SelectedEncoder};
 
 /// 延迟初始化 libav 网络和日志。多次调用幂等。
 ///
