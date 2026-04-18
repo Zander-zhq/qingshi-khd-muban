@@ -51,7 +51,7 @@ pub use remux::remux_url;
 pub use trim::trim;
 pub use silence::{detect_silence, SilenceRange};
 pub use smart_cut::smart_cut;
-pub use encoder::{pick_encoder, get_encoder_info, VideoCodec, SelectedEncoder};
+pub use encoder::{pick_encoder, get_encoder_info, get_encoder_report, VideoCodec, SelectedEncoder, EncoderReport, EncoderProbeResult};
 
 /// 延迟初始化 libav 网络和日志。多次调用幂等。
 ///

@@ -25,17 +25,44 @@ pub enum VideoCodec {
 }
 
 /// 选出的编码器
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SelectedEncoder {
     pub name: String,
     pub is_hardware: bool,
 }
 
-static CACHED_H264: OnceLock<Option<SelectedEncoder>> = OnceLock::new();
-static CACHED_H265: OnceLock<Option<SelectedEncoder>> = OnceLock::new();
+/// 单个编码器的探测结果
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EncoderProbeResult {
+    pub name: String,
+    pub is_hardware: bool,
+    pub found: bool,
+    pub usable: bool,
+    pub fail_reason: String,
+}
+
+/// 完整的编码器探测报告
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EncoderReport {
+    pub selected: Option<SelectedEncoder>,
+    pub probes: Vec<EncoderProbeResult>,
+    pub suggestion: String,
+}
+
+static CACHED_H264: OnceLock<EncoderReport> = OnceLock::new();
+static CACHED_H265: OnceLock<EncoderReport> = OnceLock::new();
 
 /// 自动探测并返回可用的最优编码器。结果会缓存，多次调用不重复探测。
 pub fn pick_encoder(codec: VideoCodec) -> Result<SelectedEncoder, MediaError> {
+    let report = get_encoder_report(codec);
+    match report.selected {
+        Some(enc) => Ok(enc),
+        None => Err(MediaError::other(report.suggestion.clone())),
+    }
+}
+
+/// 获取完整的编码器探测报告（供前端 UI 展示）。结果会缓存。
+pub fn get_encoder_report(codec: VideoCodec) -> EncoderReport {
     super::ensure_init();
 
     let cache = match codec {
@@ -43,91 +70,109 @@ pub fn pick_encoder(codec: VideoCodec) -> Result<SelectedEncoder, MediaError> {
         VideoCodec::H265 => &CACHED_H265,
     };
 
-    let result = cache.get_or_init(|| detect_best_encoder(codec));
-
-    match result {
-        Some(enc) => Ok(enc.clone()),
-        None => Err(MediaError::other(format!(
-            "未找到可用的 {:?} 编码器（请检查 GPU 驱动或 FFmpeg 编译选项）",
-            codec
-        ))),
-    }
+    cache.get_or_init(|| run_full_probe(codec)).clone()
 }
 
-fn detect_best_encoder(codec: VideoCodec) -> Option<SelectedEncoder> {
-    let candidates: &[(&str, bool)] = match codec {
+fn run_full_probe(codec: VideoCodec) -> EncoderReport {
+    let candidates: &[(&str, bool, &str)] = match codec {
         VideoCodec::H264 => &[
-            ("h264_nvenc", true),
-            ("h264_qsv", true),
-            ("h264_amf", true),
-            ("libopenh264", false),
+            ("h264_nvenc", true, "NVIDIA"),
+            ("h264_qsv", true, "Intel"),
+            ("h264_amf", true, "AMD"),
+            ("libopenh264", false, "CPU"),
         ],
         VideoCodec::H265 => &[
-            ("hevc_nvenc", true),
-            ("hevc_qsv", true),
-            ("hevc_amf", true),
+            ("hevc_nvenc", true, "NVIDIA"),
+            ("hevc_qsv", true, "Intel"),
+            ("hevc_amf", true, "AMD"),
         ],
     };
 
-    for &(name, is_hw) in candidates {
-        if test_encoder(name) {
-            return Some(SelectedEncoder {
+    let mut probes: Vec<EncoderProbeResult> = Vec::new();
+    let mut selected: Option<SelectedEncoder> = None;
+    let mut driver_issues: Vec<String> = Vec::new();
+
+    for &(name, is_hw, vendor) in candidates {
+        let (found, usable, fail_reason) = test_encoder_detailed(name);
+
+        probes.push(EncoderProbeResult {
+            name: name.to_string(),
+            is_hardware: is_hw,
+            found,
+            usable,
+            fail_reason: fail_reason.clone(),
+        });
+
+        if usable && selected.is_none() {
+            selected = Some(SelectedEncoder {
                 name: name.to_string(),
                 is_hardware: is_hw,
             });
         }
+
+        if found && !usable && is_hw {
+            driver_issues.push(format!(
+                "{} 编码器 ({}) 已检测到但无法使用，可能是显卡驱动版本过低，建议更新 {} 显卡驱动",
+                name, vendor, vendor
+            ));
+        }
     }
 
-    None
+    let suggestion = if selected.is_some() {
+        String::new()
+    } else if !driver_issues.is_empty() {
+        driver_issues.join("；")
+    } else {
+        "未找到可用的编码器，请更新显卡驱动或检查 FFmpeg 编译选项".into()
+    };
+
+    EncoderReport { selected, probes, suggestion }
 }
 
-/// 测试编码器是否真正可用（不只是 find 到，还要能 open）
-fn test_encoder(name: &str) -> bool {
+/// 详细测试编码器：返回 (found, usable, fail_reason)
+fn test_encoder_detailed(name: &str) -> (bool, bool, String) {
     let encoder = match ffmpeg::encoder::find_by_name(name) {
         Some(e) => e,
-        None => return false,
+        None => return (false, false, "未编译进 FFmpeg".into()),
     };
 
     let video_encoder = match encoder.video() {
         Ok(e) => e,
-        Err(_) => return false,
+        Err(e) => return (true, false, format!("不是视频编码器: {}", e)),
     };
 
-    let ctx = match ffmpeg::codec::context::Context::new() {
-        ctx => ctx,
+    let ctx = ffmpeg::codec::context::Context::new();
+
+    let mut enc = match ctx.encoder().video() {
+        Ok(e) => e,
+        Err(e) => return (true, false, format!("创建编码上下文失败: {}", e)),
     };
 
-    // 用最小参数尝试打开编码器
-    {
-        let mut enc = match ctx.encoder().video() {
-            Ok(e) => e,
-            Err(_) => return false,
-        };
+    enc.set_width(256);
+    enc.set_height(256);
+    enc.set_time_base(ffmpeg::Rational::new(1, 30));
+    enc.set_format(ffmpeg::format::Pixel::YUV420P);
 
-        enc.set_width(256);
-        enc.set_height(256);
-        enc.set_time_base(ffmpeg::Rational::new(1, 30));
-        enc.set_format(ffmpeg::format::Pixel::YUV420P);
-
-        match enc.open_as_with(video_encoder, ffmpeg::Dictionary::new()) {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+    match enc.open_as_with(video_encoder, ffmpeg::Dictionary::new()) {
+        Ok(_) => (true, true, String::new()),
+        Err(e) => (true, false, format!("初始化失败（可能是驱动版本过低）: {}", e)),
     }
 }
 
-/// 返回当前系统可用的编码器信息（供 UI 展示）
+/// 返回简洁的编码器信息字符串（供日志或简单 UI）
 pub fn get_encoder_info() -> String {
     super::ensure_init();
 
-    let h264 = detect_best_encoder(VideoCodec::H264);
-    let h265 = detect_best_encoder(VideoCodec::H265);
+    let h264 = get_encoder_report(VideoCodec::H264);
+    let h265 = get_encoder_report(VideoCodec::H265);
 
     format!(
         "H.264: {} | H.265: {}",
-        h264.map(|e| format!("{} ({})", e.name, if e.is_hardware { "GPU" } else { "CPU" }))
-            .unwrap_or_else(|| "无".into()),
-        h265.map(|e| format!("{} ({})", e.name, if e.is_hardware { "GPU" } else { "CPU" }))
-            .unwrap_or_else(|| "无".into()),
+        h264.selected
+            .map(|e| format!("{} ({})", e.name, if e.is_hardware { "GPU" } else { "CPU" }))
+            .unwrap_or_else(|| format!("无 - {}", h264.suggestion)),
+        h265.selected
+            .map(|e| format!("{} ({})", e.name, if e.is_hardware { "GPU" } else { "CPU" }))
+            .unwrap_or_else(|| format!("无 - {}", h265.suggestion)),
     )
 }
