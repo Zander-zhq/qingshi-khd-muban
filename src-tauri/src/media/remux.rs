@@ -29,14 +29,29 @@ pub fn remux(input: &Path, output: &Path) -> Result<u64, MediaError> {
     if !input.exists() {
         return Err(MediaError::InputNotFound(input.to_path_buf()));
     }
+    remux_from_source(&input.to_string_lossy(), output)
+}
 
+/// 从 URL 或文件路径转封装到指定输出格式（不重新编码）。
+///
+/// - `source`：输入源，支持本地路径或 HTTP/HTTPS URL（如 m3u8 地址）
+/// - `output`：输出文件路径
+///
+/// 相当于 `ffmpeg -i <source> -c copy -bsf:a aac_adtstoasc <output>`
+///
+/// 返回：输出文件的字节数
+pub fn remux_url(source: &str, output: &Path) -> Result<u64, MediaError> {
+    remux_from_source(source, output)
+}
+
+fn remux_from_source(source: &str, output: &Path) -> Result<u64, MediaError> {
     super::ensure_init();
 
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut ictx = format::input(&input)?;
+    let mut ictx = format::input(&source)?;
     let mut octx = format::output(&output)?;
 
     let mut stream_mapping: Vec<Option<usize>> = vec![None; ictx.nb_streams() as usize];

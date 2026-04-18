@@ -44,6 +44,7 @@ pub mod encoder;
 pub use error::MediaError;
 pub use concat::concat_remux;
 pub use remux::remux;
+pub use remux::remux_url;
 
 /// 延迟初始化 libav 网络和日志。多次调用幂等。
 ///
@@ -53,9 +54,9 @@ pub fn ensure_init() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        // 初始化 libavformat/libavcodec 等全局状态
         let _ = ffmpeg_next::init();
-        // 把 libav 自身的日志等级调低，避免污染 stderr
+        // 启用网络协议支持（http/https/m3u8 等 URL 输入需要）
+        unsafe { ffmpeg_next::ffi::avformat_network_init(); }
         ffmpeg_next::util::log::set_level(ffmpeg_next::util::log::Level::Error);
     });
 }
