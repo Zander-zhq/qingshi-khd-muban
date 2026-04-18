@@ -50,18 +50,8 @@ pub fn smart_cut(
 
     super::ensure_init();
 
-    // 先尝试纯 copy trim
-    let trim_result = super::trim::trim(input, output, start_sec, end_sec);
-    if trim_result.is_ok() {
-        // 检查输出文件第一帧是否是关键帧
-        if check_starts_with_keyframe(output) {
-            return trim_result;
-        }
-        // 不是关键帧，删掉重来
-        let _ = std::fs::remove_file(output);
-    }
-
-    // fallback: 重编码整个片段
+    // 直接重编码整个片段（确保从 I 帧开始，消除马赛克）
+    // 对 10-60s 的短片段，GPU 重编码也就几秒，速度可接受
     reencode_segment(input, output, start_sec, end_sec)
 }
 
