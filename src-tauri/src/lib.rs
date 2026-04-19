@@ -606,9 +606,37 @@ FunctionEnd
         }
     });
     if include_brand_config {
-        config_override["bundle"]["resources"] = serde_json::json!({
-            "../.brand-build/brand_config.enc": "resources/brand_config.enc"
-        });
+        // 品牌打包会覆盖 bundle.resources，所以需要手动把 src-tauri/resources/ 下
+        // 除了 brand_config.enc 之外的其它文件（例如 mitmdump.exe、ffmpeg.exe 等）
+        // 也一并带入，否则通用版本能带、品牌版本会漏。
+        let mut resources_map = serde_json::Map::new();
+        resources_map.insert(
+            "../.brand-build/brand_config.enc".to_string(),
+            serde_json::Value::String("resources/brand_config.enc".to_string()),
+        );
+        let res_dir = tauri_dir.join("resources");
+        if let Ok(entries) = fs::read_dir(&res_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name == "brand_config.enc"
+                    || name == "README.md"
+                    || name == ".gitkeep"
+                    || name.starts_with('.')
+                {
+                    continue;
+                }
+                let p = entry.path();
+                if !p.is_file() {
+                    continue;
+                }
+                resources_map.insert(
+                    format!("../src-tauri/resources/{}", name),
+                    serde_json::Value::String(format!("resources/{}", name)),
+                );
+                let _ = app.emit("build-log", format!("附加资源：{}", name));
+            }
+        }
+        config_override["bundle"]["resources"] = serde_json::Value::Object(resources_map);
     }
 
     if !include_brand_config {
@@ -711,6 +739,115 @@ FunctionEnd
     final_result
 }
 
+/// 读取 Windows 用户级 / 系统级环境变量（避开当前进程 env 可能没继承的场景）。
+///
+/// 场景：用户在 Windows 环境变量设置界面配好了 `FFMPEG_DIR` / `VCPKG_ROOT`，但
+///   - 已经打开的 shell 启动前没这些变量 → 从这个 shell 启动的 app 也没有
+///   - 或用户直接 GUI 启动 app（比如双击安装后的 exe），没走带环境的 shell
+/// 此时 `std::env::var("FFMPEG_DIR")` 返回空，但注册表里其实有。
+/// 通过 PowerShell `[Environment]::GetEnvironmentVariable(name, scope)` 直接查注册表最靠谱。
+#[cfg(target_os = "windows")]
+fn read_windows_registry_env(name: &str) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    let name_esc = name.replace('\'', "''");
+    // 先查 User scope，找不到再查 Machine scope
+    for scope in ["User", "Machine"] {
+        let script = format!(
+            "[System.Environment]::GetEnvironmentVariable('{}', '{}')",
+            name_esc, scope
+        );
+        let output = std::process::Command::new("powershell")
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// 解析 FFmpeg 构建依赖路径（`media` feature 启用时 `ffmpeg-sys-next` 会用到），优先级：
+///   1. 当前进程 env 里的 `FFMPEG_DIR`（正常情况）
+///   2. `VCPKG_ROOT` + `installed/x64-windows-static-release`
+///   3. Windows 用户/系统注册表里的 `FFMPEG_DIR` 或 `VCPKG_ROOT`
+///   4. 常见路径兜底（`E:\vcpkg`, `C:\vcpkg`, `C:\tools\vcpkg`）
+///
+/// 返回 `(ffmpeg_dir, vcpkg_root)`，分别可能为 `None`。
+///
+/// **仅 media feature 启用时有意义**。未启用 media 的产品完全不需要 FFmpeg，
+/// 这两个变量不注入也没事，对构建无影响。
+fn resolve_build_env() -> (Option<String>, Option<String>) {
+    use std::path::Path;
+
+    fn valid_ffmpeg(dir: &str) -> bool {
+        let p = Path::new(dir);
+        p.join("lib").is_dir() && p.join("include").is_dir()
+    }
+    fn from_vcpkg_root(root: &str) -> Option<String> {
+        let candidate = Path::new(root).join("installed").join("x64-windows-static-release");
+        if candidate.join("lib").is_dir() && candidate.join("include").is_dir() {
+            Some(candidate.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    }
+
+    // 1) 当前进程 env
+    let mut ffmpeg_dir = std::env::var("FFMPEG_DIR").ok().filter(|d| valid_ffmpeg(d));
+    let mut vcpkg_root = std::env::var("VCPKG_ROOT").ok().filter(|r| Path::new(r).is_dir());
+
+    // 2) VCPKG_ROOT 推导 FFMPEG_DIR
+    if ffmpeg_dir.is_none() {
+        if let Some(root) = &vcpkg_root {
+            ffmpeg_dir = from_vcpkg_root(root);
+        }
+    }
+
+    // 3) 从 Windows 注册表读
+    #[cfg(target_os = "windows")]
+    {
+        if ffmpeg_dir.is_none() {
+            if let Some(dir) = read_windows_registry_env("FFMPEG_DIR") {
+                if valid_ffmpeg(&dir) {
+                    ffmpeg_dir = Some(dir);
+                }
+            }
+        }
+        if vcpkg_root.is_none() {
+            if let Some(root) = read_windows_registry_env("VCPKG_ROOT") {
+                if Path::new(&root).is_dir() {
+                    vcpkg_root = Some(root);
+                }
+            }
+        }
+        if ffmpeg_dir.is_none() {
+            if let Some(root) = &vcpkg_root {
+                ffmpeg_dir = from_vcpkg_root(root);
+            }
+        }
+    }
+
+    // 4) 常见路径兜底
+    if ffmpeg_dir.is_none() {
+        for root in ["E:\\vcpkg", "C:\\vcpkg", "C:\\tools\\vcpkg"] {
+            if let Some(dir) = from_vcpkg_root(root) {
+                ffmpeg_dir = Some(dir);
+                if vcpkg_root.is_none() {
+                    vcpkg_root = Some(root.to_string());
+                }
+                break;
+            }
+        }
+    }
+
+    (ffmpeg_dir, vcpkg_root)
+}
+
 fn run_build_process(app: &AppHandle, project_root: &PathBuf, tauri_dir: &PathBuf, config_file: &str, version: Option<&str>) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     let mut cmd = std::process::Command::new("cmd");
@@ -725,6 +862,21 @@ fn run_build_process(app: &AppHandle, project_root: &PathBuf, tauri_dir: &PathBu
     cmd.current_dir(project_root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+
+    // 注入 FFmpeg 构建依赖：启用 media feature 的产品在 release 全量编译时，
+    // 需要 `FFMPEG_DIR` / `VCPKG_ROOT` 让 `ffmpeg-sys-next` 找到 vcpkg 预装的静态库。
+    // 当前 app 进程可能没继承到这些变量（shell 设完没重启 / GUI 启动），
+    // 这里显式探测后注入子进程，省得用户每次构建前都要 restart shell。
+    // 未启用 media 的产品不受影响——FFmpeg 变量不参与构建，注入了也是空跑。
+    let (ffmpeg_dir, vcpkg_root) = resolve_build_env();
+    if let Some(dir) = &ffmpeg_dir {
+        cmd.env("FFMPEG_DIR", dir);
+        let _ = app.emit("build-log", format!("FFMPEG_DIR={}", dir));
+    }
+    if let Some(root) = &vcpkg_root {
+        cmd.env("VCPKG_ROOT", root);
+        let _ = app.emit("build-log", format!("VCPKG_ROOT={}", root));
+    }
 
     if let Some(v) = version {
         let ver = if v.starts_with('V') || v.starts_with('v') {
