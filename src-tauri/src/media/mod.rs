@@ -46,8 +46,7 @@ pub mod encoder;
 
 pub use error::MediaError;
 pub use concat::concat_remux;
-pub use remux::remux;
-pub use remux::remux_url;
+pub use remux::{remux, remux_url, remux_with_progress, remux_url_with_progress};
 pub use trim::trim;
 pub use silence::{detect_silence, SilenceRange};
 pub use smart_cut::smart_cut;
