@@ -243,13 +243,55 @@ function closeQrModal() {
 interface SubItem { label: string; icon?: string; path: string }
 interface MenuItem { label: string; icon: string; path?: string; children?: SubItem[] }
 
-const appMenuItems: MenuItem[] = appRoutes
-  .filter(r => r.meta?.menuItem)
-  .sort((a, b) => ((a.meta!.menuItem as any).order ?? 99) - ((b.meta!.menuItem as any).order ?? 99))
-  .map(r => {
-    const mi = r.meta!.menuItem as { label: string; icon: string }
-    return { label: mi.label, icon: mi.icon, path: `/main/${String(r.path)}` }
-  })
+// 聚合 routes 的 menuItem 为 MenuItem 列表：
+//   - 未设 group 的路由 → 直接渲染为一级菜单（带 path）
+//   - 相同 group 的路由 → 合并为一个带 children 的父级菜单
+function buildAppMenuItems(): MenuItem[] {
+  type MI = { label: string; icon: string; order?: number; group?: string; groupIcon?: string; groupOrder?: number }
+  const groupsMap = new Map<string, { label: string; icon: string; order: number; children: (SubItem & { _order: number })[] }>()
+  const singles: (MenuItem & { _order: number })[] = []
+
+  for (const r of appRoutes) {
+    const mi = r.meta?.menuItem as MI | undefined
+    if (!mi) continue
+    const path = `/main/${String(r.path)}`
+
+    if (mi.group) {
+      let g = groupsMap.get(mi.group)
+      if (!g) {
+        g = {
+          label: mi.group,
+          icon: mi.groupIcon || mi.icon,
+          order: mi.groupOrder ?? 99,
+          children: [],
+        }
+        groupsMap.set(mi.group, g)
+      } else {
+        if (mi.groupIcon && !g.icon) g.icon = mi.groupIcon
+        if (mi.groupOrder != null && g.order === 99) g.order = mi.groupOrder
+      }
+      g.children.push({ label: mi.label, icon: mi.icon, path, _order: mi.order ?? 99 })
+    } else {
+      singles.push({ label: mi.label, icon: mi.icon, path, _order: mi.order ?? 99 } as MenuItem & { _order: number })
+    }
+  }
+
+  const result: (MenuItem & { _order: number })[] = []
+  for (const g of groupsMap.values()) {
+    g.children.sort((a, b) => a._order - b._order)
+    result.push({
+      label: g.label,
+      icon: g.icon,
+      children: g.children.map(({ _order, ...rest }) => { void _order; return rest }),
+      _order: g.order,
+    } as MenuItem & { _order: number })
+  }
+  result.push(...singles)
+  result.sort((a, b) => (a._order ?? 99) - (b._order ?? 99))
+  return result.map(({ _order, ...rest }) => { void _order; return rest as MenuItem })
+}
+
+const appMenuItems: MenuItem[] = buildAppMenuItems()
 
 const menuItems: MenuItem[] = [
   { label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },

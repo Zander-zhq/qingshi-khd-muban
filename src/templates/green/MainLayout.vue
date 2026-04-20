@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import InputText from 'primevue/inputtext'
 import Button from 'primevue/button'
@@ -64,26 +64,116 @@ async function handleCheckin() {
 }
 
 const displayName = computed(() => userStore.userInfo?.username || '用户')
-const appMenuItems = appRoutes
-  .filter(r => r.meta?.menuItem)
-  .sort((a, b) => ((a.meta!.menuItem as any).order ?? 99) - ((b.meta!.menuItem as any).order ?? 99))
-  .map(r => {
-    const mi = r.meta!.menuItem as { label: string; icon: string }
-    return { label: mi.label, icon: mi.icon, path: `/main/${String(r.path)}` }
-  })
 
-const menuItems = [
-  { label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },
-  ...appMenuItems,
+// 菜单项类型：
+//   - type='item'：直接渲染为一级菜单
+//   - type='group'：父级目录，展开后显示 children
+type MenuLeaf = { label: string; icon: string; path: string }
+type MenuNode =
+  | ({ type: 'item' } & MenuLeaf)
+  | { type: 'group'; label: string; icon: string; order: number; children: MenuLeaf[] }
+
+// 将 routes.ts 的 menuItem 聚合为分组 / 一级菜单
+function buildAppMenuNodes(): MenuNode[] {
+  type MI = { label: string; icon: string; order?: number; group?: string; groupIcon?: string; groupOrder?: number }
+  const groupsMap = new Map<string, { label: string; icon: string; order: number; children: (MenuLeaf & { _order: number })[] }>()
+  const singles: (MenuLeaf & { _order: number })[] = []
+
+  for (const r of appRoutes) {
+    const mi = r.meta?.menuItem as MI | undefined
+    if (!mi) continue
+    const leaf: MenuLeaf & { _order: number } = {
+      label: mi.label,
+      icon: mi.icon,
+      path: `/main/${String(r.path)}`,
+      _order: mi.order ?? 99,
+    }
+
+    if (mi.group) {
+      let g = groupsMap.get(mi.group)
+      if (!g) {
+        g = {
+          label: mi.group,
+          icon: mi.groupIcon || mi.icon,
+          order: mi.groupOrder ?? 99,
+          children: [],
+        }
+        groupsMap.set(mi.group, g)
+      } else {
+        // 后续条目如果给了 groupIcon / groupOrder，允许覆盖（第一次没设时）
+        if (mi.groupIcon && !g.icon) g.icon = mi.groupIcon
+        if (mi.groupOrder != null && g.order === 99) g.order = mi.groupOrder
+      }
+      g.children.push(leaf)
+    } else {
+      singles.push(leaf)
+    }
+  }
+
+  const nodes: (MenuNode & { _order: number })[] = []
+  for (const g of groupsMap.values()) {
+    g.children.sort((a, b) => a._order - b._order)
+    nodes.push({
+      type: 'group',
+      label: g.label, icon: g.icon, order: g.order,
+      children: g.children.map(({ _order, ...rest }) => { void _order; return rest }),
+      _order: g.order,
+    } as MenuNode & { _order: number })
+  }
+  for (const s of singles) {
+    nodes.push({ type: 'item', label: s.label, icon: s.icon, path: s.path, _order: s._order } as MenuNode & { _order: number })
+  }
+  nodes.sort((a, b) => (a._order ?? 99) - (b._order ?? 99))
+  return nodes.map(({ _order, ...rest }) => { void _order; return rest as MenuNode })
+}
+
+const appMenuNodes = buildAppMenuNodes()
+
+const menuItems: MenuNode[] = [
+  { type: 'item', label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },
+  ...appMenuNodes,
   ...(import.meta.env.DEV ? [
-    { label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' },
-    { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },
+    { type: 'item', label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' } as MenuNode,
+    { type: 'item', label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' } as MenuNode,
   ] : []),
 ]
 
+// 当前路由所在分组默认展开；其他分组默认折叠
+const expandedGroups = ref<Set<string>>(new Set())
+
+function isGroupActive(group: { children: MenuLeaf[] }): boolean {
+  return group.children.some(c => route.path === c.path)
+}
+
+function toggleGroup(label: string) {
+  const s = new Set(expandedGroups.value)
+  if (s.has(label)) s.delete(label); else s.add(label)
+  expandedGroups.value = s
+}
+
+function isGroupExpanded(label: string): boolean {
+  return expandedGroups.value.has(label)
+}
+
+// 路由变化时，自动展开包含当前路由的分组
+watch(() => route.path, () => {
+  const s = new Set(expandedGroups.value)
+  for (const n of menuItems) {
+    if (n.type === 'group' && isGroupActive(n)) {
+      s.add(n.label)
+    }
+  }
+  expandedGroups.value = s
+}, { immediate: true })
+
 const pageTitle = computed(() => {
-  const found = menuItems.find(m => route.path === m.path)
-  if (found) return found.label
+  for (const m of menuItems) {
+    if (m.type === 'item' && route.path === m.path) return m.label
+    if (m.type === 'group') {
+      const child = m.children.find(c => route.path === c.path)
+      if (child) return child.label
+    }
+  }
   return '主页'
 })
 
@@ -626,18 +716,50 @@ async function submitUnbind() {
         </div>
 
         <nav class="sidebar-nav">
-          <button
-            v-for="item in menuItems"
-            :key="item.path"
-            type="button"
-            class="nav-item"
-            :class="{ active: route.path === item.path }"
-            :title="collapsed ? item.label : undefined"
-            @click="handleNavigate(item.path)"
-          >
-            <i :class="item.icon"></i>
-            <span class="nav-label">{{ item.label }}</span>
-          </button>
+          <template v-for="(node, idx) in menuItems" :key="idx">
+            <!-- 单项菜单 -->
+            <button
+              v-if="node.type === 'item'"
+              type="button"
+              class="nav-item"
+              :class="{ active: route.path === node.path }"
+              :title="collapsed ? node.label : undefined"
+              @click="handleNavigate(node.path)"
+            >
+              <i :class="node.icon"></i>
+              <span class="nav-label">{{ node.label }}</span>
+            </button>
+
+            <!-- 分组（父级 + 子项） -->
+            <div v-else class="nav-group" :class="{ 'nav-group--open': isGroupExpanded(node.label) }">
+              <button
+                type="button"
+                class="nav-item nav-item--group"
+                :class="{ 'group-active': isGroupActive(node) }"
+                :title="collapsed ? node.label : undefined"
+                @click="toggleGroup(node.label)"
+              >
+                <i :class="node.icon"></i>
+                <span class="nav-label">{{ node.label }}</span>
+                <i class="pi pi-chevron-down nav-group-arrow" v-if="!collapsed"></i>
+              </button>
+              <Transition name="nav-group-expand">
+                <div v-if="!collapsed && isGroupExpanded(node.label)" class="nav-group-children">
+                  <button
+                    v-for="child in node.children"
+                    :key="child.path"
+                    type="button"
+                    class="nav-item nav-item--child"
+                    :class="{ active: route.path === child.path }"
+                    @click="handleNavigate(child.path)"
+                  >
+                    <i :class="child.icon"></i>
+                    <span class="nav-label">{{ child.label }}</span>
+                  </button>
+                </div>
+              </Transition>
+            </div>
+          </template>
         </nav>
 
         <button type="button" class="collapse-btn" :title="collapsed ? '展开菜单' : '折叠菜单'" @click="toggleSidebar">
@@ -1276,6 +1398,68 @@ async function submitUnbind() {
   color: #fff;
   box-shadow: inset 0 0 0 1px rgba(94, 234, 212, 0.12);
 }
+
+/* ── 分组（一级目录） ── */
+.nav-group { display: flex; flex-direction: column; }
+.nav-item--group { position: relative; }
+.nav-item--group.group-active { color: #fff; }
+.nav-item--group.group-active > i:first-child {
+  color: #5eead4;
+}
+.nav-group-arrow {
+  margin-left: auto;
+  font-size: 0.7rem !important;
+  width: auto !important;
+  color: #64748b;
+  transition: transform 0.2s ease;
+}
+.nav-group--open .nav-group-arrow { transform: rotate(180deg); color: #94a3b8; }
+
+.nav-group-children {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0 2px 8px;
+  margin-left: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.nav-item--child {
+  height: 36px;
+  font-size: 0.83rem;
+  padding: 0 12px;
+  color: #94a3b8;
+}
+.nav-item--child i {
+  font-size: 0.82rem;
+}
+.nav-item--child:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: #e2e8f0;
+}
+.nav-item--child.active {
+  background: linear-gradient(135deg, rgba(45, 212, 191, 0.22), rgba(13, 148, 136, 0.32));
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(94, 234, 212, 0.12);
+}
+
+.nav-group-expand-enter-active,
+.nav-group-expand-leave-active {
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+  max-height: 320px;
+  overflow: hidden;
+}
+.nav-group-expand-enter-from,
+.nav-group-expand-leave-to {
+  max-height: 0;
+  opacity: 0;
+}
+
+/* 折叠侧边栏时，分组父级也居中显示图标，子级隐藏 */
+.sidebar--collapsed .nav-item--group { justify-content: center; padding: 0; }
+.sidebar--collapsed .nav-group-arrow { display: none; }
+.sidebar--collapsed .nav-group-children { display: none; }
 
 /* ── Collapse Button ── */
 .collapse-btn {
