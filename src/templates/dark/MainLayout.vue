@@ -298,7 +298,7 @@ const menuItems: MenuItem[] = [
   { label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },
   ...appMenuItems,
   ...(import.meta.env.DEV ? [{
-    label: '开发工具', icon: 'pi pi-wrench',
+    label: '系统管理', icon: 'pi pi-wrench',
     children: [
       { label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' },
       { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },

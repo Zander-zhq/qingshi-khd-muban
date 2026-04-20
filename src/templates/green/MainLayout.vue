@@ -133,8 +133,13 @@ const menuItems: MenuNode[] = [
   { type: 'item', label: '仪表盘', icon: 'pi pi-home', path: '/main/dashboard' },
   ...appMenuNodes,
   ...(import.meta.env.DEV ? [
-    { type: 'item', label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' } as MenuNode,
-    { type: 'item', label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' } as MenuNode,
+    {
+      type: 'group', label: '系统管理', icon: 'pi pi-wrench', order: 100,
+      children: [
+        { label: '品牌管理', icon: 'pi pi-palette', path: '/main/dev-brand' },
+        { label: '版本管理', icon: 'pi pi-tag', path: '/main/dev-version' },
+      ],
+    } as MenuNode,
   ] : []),
 ]
 
